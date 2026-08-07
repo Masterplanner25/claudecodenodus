@@ -1,0 +1,10 @@
+{
+  "name": "research.web_search",
+  "description": "Query a search engine; return ranked URL + snippet list.",
+  "version": "1.0",
+  "sandbox_tier": "container",
+  "schema": { "query": "string", "max_results": "int" },
+  "returns_schema": { "results": "list" },
+  "effects": ["network.read"],
+  "provenance": { "trust_class": "trusted", "origin": "local" }
+}

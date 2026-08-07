@@ -1,0 +1,10 @@
+{
+  "name": "research.run_code",
+  "description": "Execute Python in an isolated container; return stdout/stderr/exit_code.",
+  "version": "1.0",
+  "sandbox_tier": "container",
+  "schema": { "code": "string", "timeout_seconds": "int" },
+  "returns_schema": { "stdout": "string", "stderr": "string", "exit_code": "int" },
+  "effects": ["subprocess.exec"],
+  "provenance": { "trust_class": "trusted", "origin": "local" }
+}

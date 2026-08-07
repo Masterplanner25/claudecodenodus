@@ -1,0 +1,23 @@
+# SECRETS — never commit
+.env
+.env.*
+*.key
+*.pem
+
+# local copy of the Nodus assistant skill; pins a version and goes stale.
+# canonical: https://github.com/Masterplanner25/Nodus/tree/main/skills
+.claude/
+
+# generated at run time
+workspace/
+.nodus/
+
+# tooling caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# environments
+venv/
+.venv/

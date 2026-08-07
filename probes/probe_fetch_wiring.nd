@@ -1,0 +1,29 @@
+import "std:tool" as tool
+import "std:json" as json
+
+tool.register({name: "research.web_search", description: "stub", handler: fn(args) { return {"results": [{"url": "https://ex/1", "title": "T1", "snippet": "s1"}, {"url": "https://ex/2", "title": "T2", "snippet": "s2"}]} }, schema: {"query": "string", "max_results": "int"}})
+tool.register({name: "research.fetch_doc", description: "stub", handler: fn(args) { return {"text": "full text of \(args["url"])", "title": "Doc", "fetched_at": "t", "content_hash": "h"} }, schema: {"url": "string", "max_chars": "int"}})
+
+fn fetch_top(results) {
+    if (len(results) > 0i) {
+        let url = results[0i]["url"]
+        let fetched = tool.call("research.fetch_doc", {"url": url, "max_chars": 4000i})
+        return json.parse(json.stringify(fetched))
+    }
+    return nil
+}
+
+fn gather_sources(q, n) {
+    let raw = tool.call("research.web_search", {"query": q, "max_results": n})
+    let parsed = json.parse(json.stringify(raw))
+    let results = parsed["results"]
+    let doc = fetch_top(results)
+    return {"results": results, "top_doc": doc}
+}
+
+let empty_check = fetch_top([])
+let g = gather_sources("what is x", 5i)
+print("empty_check is nil: \(empty_check == nil)")
+print("results count: \(len(g["results"]))")
+print("top_doc text: \(g["top_doc"]["text"])")
+print("top_doc content_hash: \(g["top_doc"]["content_hash"])")

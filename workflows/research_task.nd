@@ -1,0 +1,83 @@
+import "std:tool" as tool
+import "std:memory" as mem
+import "std:json" as json
+
+// _init_question and _init_session_id are injected by the Python host
+// via initial_globals before run_workflow() is called.
+
+// Fetch the full text of the top search result so the draft is built from real
+// page content, not just search snippets. Returns nil when there are no results.
+fn fetch_top(results) {
+    if (len(results) > 0i) {
+        let url = results[0i]["url"]
+        let fetched = tool.call("research.fetch_doc", {"url": url, "max_chars": 4000i})
+        return json.parse(json.stringify(fetched))
+    }
+    return nil
+}
+
+// One gather unit: search, then enrich with the top result's fetched document.
+fn gather_sources(q, n) {
+    let raw = tool.call("research.web_search", {"query": q, "max_results": n})
+    let parsed = json.parse(json.stringify(raw))
+    let results = parsed["results"]
+    let doc = fetch_top(results)
+    return {"results": results, "top_doc": doc}
+}
+
+workflow research_task {
+    state question = _init_question
+    state session_id = _init_session_id
+    state notify_channel = _init_notify_channel
+    state notify_target = _init_notify_target
+    state draft = nil
+
+    step init {
+        mem.put("research/\(session_id)/meta", {"question": question})
+        return session_id
+    }
+
+    step gather_web after init {
+        return gather_sources(question, 5i)
+    }
+
+    step gather_code after init {
+        let q = "\(question) code examples"
+        return gather_sources(q, 3i)
+    }
+
+    step gather_data after init {
+        let q = "\(question) research data"
+        return gather_sources(q, 3i)
+    }
+
+    step analyze after gather_web, gather_code, gather_data {
+        return {"web": gather_web, "code": gather_code, "data": gather_data}
+    }
+
+    step draft_step after analyze {
+        checkpoint "before_draft"
+        let p = workflow_resume_payload()
+        let fb = ""
+        if (p != nil) {
+            fb = p["feedback"]
+        }
+        let analysis_json = json.stringify(analyze)
+        let r = json.parse(json.stringify(tool.call("research.synthesize", {"question": question, "analysis": analysis_json, "feedback": fb})))
+        let new_draft = r["draft"]
+        draft = new_draft
+        mem.put("research/\(session_id)/draft", new_draft)
+        return new_draft
+    }
+
+    step review after draft_step {
+        return workflow_wait("approval_required", session_id, {"draft": draft, "session_id": session_id})
+    }
+
+    step publish after review {
+        let _wr = tool.call("research.write_file", {"path": "output/\(session_id)/final.md", "content": draft, "format": "markdown"})
+        let _nr = tool.call("research.notify", {"channel": notify_channel, "target": notify_target, "message": "Research complete: \(question)", "run_id": session_id})
+        mem.put("research/\(session_id)/final", draft)
+        return {"published": true, "session_id": session_id}
+    }
+}

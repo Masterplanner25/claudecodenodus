@@ -1,0 +1,121 @@
+Overall status
+
+  UPDATE 2026-07-04: the data plane is now FULLY REAL — there are no mock tools left. All five tools are
+  real and live-verified: web_search + fetch_doc (real HTTP; fetch wired into the DAG), run_code (hardened
+  Docker sandbox, verified against a live daemon), LLM synthesis (real, via claude-opus-4-8), and
+  research.notify (real multi-channel delivery — console/webhook/slack/email — verified end-to-end through
+  the publish step against a loopback server). See the "Update log" at the bottom for details. The two
+  sentences below describe the ORIGINAL pre-update state and are retained for history — they no longer
+  reflect the data plane. Suites: Python 68/68, Nodus 9/9, check OK.
+
+  The project is architecturally complete and fully green on the control plane; the data plane is still stubbed. That's the one sentence that matters: the orchestration, approval, and durability machinery is
+  built and tested end-to-end, but the tools that would do real research are mocks.
+
+  Tests: Python 44/44, Nodus 9/9, nodus check OK. (Nodus is now 4.0.8.)
+
+  What's done and verified
+
+  ┌────────────────────────────────────────────┬───────────────────────┬──────────────────────────────────────────────────────────────────────┐
+  │                   Layer                    │        Status         │                                Notes                                 │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Workflow DAG (research_task.nd)            │ ✅ Real               │ gather→analyze→draft→review→publish, checkpoint-replay revision loop │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Draft→review→approve/reject loop           │ ✅ Real + tested      │ workflow_wait + resume, feedback replay                              │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Cross-process durable resume               │ ✅ Real + tested      │ unblocked by v4.0.7; verified two-OS-process                         │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Durable approval store (FileApprovalStore) │ ✅ Real + tested      │ JSON-per-request, atomic writes                                      │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Effect-based gating (require_for_effects)  │ ✅ Real + tested      │ in-repo; upstream classmethod is the follow-up                       │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Extension manifests (5)                    │ ✅ Real, load-bearing │ drive tool registration from disk                                    │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Approval HTTP API                          │ ✅ Real + tested      │ stdlib, no deps; service + /gate endpoints                           │
+  ├────────────────────────────────────────────┼───────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ LLM wiring (research.synthesize)           │ ✅ Real path exists   │ FailoverClient; offline deterministic fallback is the default        │
+  └────────────────────────────────────────────┴───────────────────────┴──────────────────────────────────────────────────────────────────────┘
+
+  What's NOT done (the gap to a real agent)
+
+  1. [RESOLVED 2026-07-04] Tool handlers are now ALL real — _dispatch in runtime.py: web_search + fetch_doc are REAL HTTP (src/web.py); run_code is a hardened Docker sandbox (src/sandbox.py), live-verified
+  against a running daemon; notify is real multi-channel delivery (src/notify.py), live-verified end-to-end. No mock tools remain. fetch_doc is wired into the gather steps (top result's full page text feeds the draft).
+  2. [RESOLVED 2026-07-04] LLM online has now been exercised against a live model (claude-opus-4-8) — real cited synthesis confirmed. Offline deterministic fallback still applies when no key is set (keeps tests hermetic).
+  3. src/memory.py — listed in the plan, never created (memory ops are inline via std:memory, which is fine, but the plan's tag-based cross-session recall isn't wired).
+  4. Known Nodus defects unaddressed by design — @exactly_once is per-VM in-memory only (EXACT-001), so the "content_hash = idempotency key" guarantee doesn't survive restarts. Fine for single-session, not for
+  distributed.
+
+  Completion estimate
+
+  - As a reference architecture / control-plane skeleton: ~90%. The hard, novel problems (durable human-in-the-loop across processes, effect-gated approval, auditable fixed DAG) are solved and tested.
+  - As a working research agent that actually researches: ~90% (as of 2026-07-04). Every tool that touches the real world is now real and live-verified — no mocks remain. Residual gaps are non-tool: EXACT-001 (@exactly_once per-VM only, not distributed-durable) and the unbuilt tag-based cross-session recall (src/memory.py); memory ops are inline via std:memory.
+
+  The remaining work is mostly integration, not invention: replace 5 stub functions with real implementations (a search API, an HTTP fetcher, a Docker sandbox for code, a real notifier) and run the LLM online.
+  The orchestration won't change — the tool contracts (manifests + handler signatures) are already fixed, so it's drop-in.
+
+  Suggested next step (if you want to keep going)
+
+  The highest-value, lowest-risk move is (c) make the tools real, one at a time — start with web_search + fetch_doc (real HTTP, no sandbox needed) so the agent produces genuine findings, then run_code with
+  Docker, then flip the LLM online with a smoke test. Want me to take that on, or is the control-plane skeleton the intended deliverable and we stop here?
+
+  ─────────────────────────────────────────────────────────────────────────────
+  Update log
+  ─────────────────────────────────────────────────────────────────────────────
+
+  2026-07-03 — (c) step 1 of 3 done: web_search + fetch_doc are REAL.
+    - New src/web.py: HttpWebBackend (real network) + OfflineWebBackend (deterministic, for hermetic tests).
+    - Search provider auto-selects: Tavily (TAVILY_API_KEY) → Brave (BRAVE_API_KEY) → keyless Wikipedia.
+      DuckDuckGo (html/lite/instant-answer) is now bot-blocked (403/202) — dropped. Wikipedia MediaWiki
+      API is the reliable keyless default (requires a descriptive User-Agent).
+    - fetch_doc: real GET + HTML→text via a stdlib HTMLParser (no bs4/lxml). Returns content_hash = sha256(text).
+    - Backend injected via ResearchRuntime(web_backend=...), threaded through _dispatch. Both handlers fail open.
+    - Tests: tests/test_web.py (13, httpx.MockTransport). Suites: Python 44/44, Nodus 9/9, check OK.
+    - Live-verified end-to-end: real Wikipedia URLs flow into the draft (keyless, offline LLM).
+
+    Remaining in (c):
+      2. run_code — DONE (implemented + unit-tested). src/sandbox.py::DockerCodeRunner. Hardened flags,
+         code fed over stdin (no shell injection), fails soft when daemon down. tests/test_sandbox.py (13).
+         STILL TODO: live-verify against a running Docker daemon (blocked here — daemon won't start).
+      3. LLM online — needs ANTHROPIC_API_KEY (not set). Code path exists; just needs a key + smoke test.
+
+  2026-07-03 (cont.) — (c) step 3 of 3: fetch_doc wired into the DAG.
+    - workflows/research_task.nd: added top-level fn gather_sources(q,n) + fetch_top(results). Each
+      gather step now searches AND fetches the top result's full page text → {results, top_doc}.
+    - Mirrored into the Nodus test's inline workflow (tests/research_task_test.nd). Probe:
+      probes/probe_fetch_wiring.nd. Live-verified: real fetched Wikipedia text (4000 chars, real
+      content_hash) flows into the draft (~3k → ~16k chars).
+    - Minor known limitation: fetched Wikipedia pages still carry some top-of-page chrome (language
+      list); a real LLM handles it. Deeper boilerplate stripping deferred.
+
+  2026-07-04 — (c) COMPLETE. All four data-plane tools are real and LIVE-VERIFIED.
+    - LLM online: verified against claude-opus-4-8 with the user's ANTHROPIC_API_KEY (loaded from .env).
+      research.synthesize produced a real inline-cited markdown brief (not the offline fallback).
+      Default model bumped claude-sonnet-4-6 → claude-opus-4-8 (RESEARCH_LLM_MODEL overrides). nodus_llm's
+      Anthropic provider only sends temperature when != 0.7, and synthesize never sets one, so no
+      sampling-param 400s on current models.
+    - run_code Docker sandbox: live-verified against a running daemon (Docker Desktop 29.2.1). All hardening
+      holds — exec OK; --network none blocks egress; user=nobody (uid 65534); read-only rootfs (write to /
+      fails, /tmp tmpfs OK); non-zero exit passthrough; in-container code timeout kills runaway code (exit 124).
+    - IMPORTANT run_code fix: container startup on Docker Desktop/WSL2 is ~39s wall-time on this machine.
+      The code timeout is now enforced INSIDE the container via coreutils `timeout -k 5 <N>`, and the
+      subprocess deadline is <N> + startup_overhead (default 90s), so slow startup never eats the code budget.
+      (Before this, every run spuriously timed out because 30s < 39s startup.)
+
+    Suites: Python 57/57, Nodus 9/9, check OK. (At this point the only remaining stub was research.notify.)
+
+  2026-07-04 (cont.) — research.notify is now REAL. src/notify.py::HttpNotifier dispatches on channel:
+    console/log (print), webhook (POST {run_id,message} → delivered on 2xx), slack (POST {"text":...} →
+    delivered on "200 ok"), email (SMTP via RESEARCH_SMTP_* env; clear not-configured result otherwise).
+    Every path FAILS SOFT (returns delivered:False + error string, never raises) so a bad notify can't abort
+    publish. Injected via ResearchRuntime(notifier=...); default real HttpNotifier, tests use ConsoleNotifier.
+    DAG change: the publish step's notify channel/target now come from injected globals _init_notify_channel /
+    _init_notify_target (env RESEARCH_NOTIFY_CHANNEL / RESEARCH_NOTIFY_TARGET; default "console"/"researcher"),
+    so the agent delivers a real console notification out of the box and a real webhook/slack when configured.
+    Mirrored into the Nodus inline test. Tests: tests/test_notify.py (11). Live-verified END-TO-END: ran the
+    full agent with RESEARCH_NOTIFY_CHANNEL=webhook pointed at a loopback HTTP server; publish POSTed the
+    notification and the server received {run_id, message} correctly.
+
+    THE DATA PLANE IS NOW FULLY REAL — no mock tools remain. Suites: Python 68/68, Nodus 9/9, check OK.
+
+
+
+  

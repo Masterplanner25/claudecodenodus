@@ -1,0 +1,15 @@
+{
+  "name": "research.notify",
+  "description": "Send a notification via webhook, email, or Slack.",
+  "version": "1.0",
+  "sandbox_tier": "container",
+  "schema": {
+    "channel": "string",
+    "target": "string",
+    "message": "string",
+    "run_id": "string"
+  },
+  "returns_schema": { "delivered": "bool", "response": "string" },
+  "effects": ["network.write"],
+  "provenance": { "trust_class": "trusted", "origin": "local" }
+}

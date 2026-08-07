@@ -1,0 +1,39 @@
+workflow checkpoint_test {
+    state draft = "none"
+
+    step draft_step {
+        checkpoint "before_draft"
+        let p = workflow_resume_payload()
+        if (p != nil) {
+            let fb = p["feedback"]
+            draft = "revised: \(fb)"
+        } else {
+            draft = "initial draft"
+        }
+        return draft
+    }
+
+    step review after draft_step {
+        return workflow_wait("approval_required", "r1", {"draft": draft})
+    }
+
+    step done after review {
+        let p = workflow_resume_payload()
+        return p
+    }
+}
+
+let r1 = run_workflow(checkpoint_test)
+print("--- round 1 ---")
+print(r1["status"])
+print(r1["state"]["draft"])
+let gid = r1["graph_id"]
+
+let r2 = resume_workflow(gid, "before_draft", {"feedback": "needs work"})
+print("--- round 2 (checkpoint replay) ---")
+print(r2["status"])
+print(r2["state"]["draft"])
+
+let r3 = resume_workflow(gid, {"approved": true})
+print("--- final (approved) ---")
+print(r3["steps"]["done"])

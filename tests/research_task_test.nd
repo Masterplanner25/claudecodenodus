@@ -1,0 +1,169 @@
+import "std:test" as t
+import "std:tool" as tool
+import "std:memory" as mem
+import "std:json" as json
+
+// ── stub tool registrations ────────────────────────────────────────────────
+
+tool.register({name: "research.web_search", description: "stub", handler: fn(args) { return {"results": [{"url": "https://example.com", "title": "Result", "snippet": "..."}]} }, schema: {"query": "string", "max_results": "int"}})
+tool.register({name: "research.fetch_doc", description: "stub", handler: fn(args) { return {"text": "stub content", "title": "Stub", "fetched_at": "2026-06-21", "content_hash": "abc123"} }, schema: {"url": "string", "max_chars": "int"}})
+tool.register({name: "research.run_code", description: "stub", handler: fn(args) { return {"stdout": "ok", "stderr": "", "exit_code": 0} }, schema: {"code": "string", "timeout_seconds": "int"}})
+tool.register({name: "research.synthesize", description: "stub", handler: fn(args) { return {"draft": "draft for \(args["question"]) fb=\(args["feedback"])"} }, schema: {"question": "string", "analysis": "string", "feedback": "string"}})
+tool.register({name: "research.write_file", description: "stub", handler: fn(args) { return {"written_bytes": 100i, "path": args["path"]} }, schema: {"path": "string", "content": "string", "format": "string"}})
+tool.register({name: "research.notify", description: "stub", handler: fn(args) { return {"delivered": true, "response": "ok"} }, schema: {"channel": "string", "target": "string", "message": "string", "run_id": "string"}})
+
+// ── module globals for workflow state init ─────────────────────────────────
+
+let _init_question = "What is LLM safety?"
+let _init_session_id = "test-sess-001"
+let _init_notify_channel = "console"
+let _init_notify_target = "researcher"
+
+// ── gather helpers (mirror workflows/research_task.nd) ─────────────────────
+
+fn fetch_top(results) {
+    if (len(results) > 0i) {
+        let url = results[0i]["url"]
+        let fetched = tool.call("research.fetch_doc", {"url": url, "max_chars": 4000i})
+        return json.parse(json.stringify(fetched))
+    }
+    return nil
+}
+
+fn gather_sources(q, n) {
+    let raw = tool.call("research.web_search", {"query": q, "max_results": n})
+    let parsed = json.parse(json.stringify(raw))
+    let results = parsed["results"]
+    let doc = fetch_top(results)
+    return {"results": results, "top_doc": doc}
+}
+
+// ── inline workflow definition ─────────────────────────────────────────────
+
+workflow research_task {
+    state question = _init_question
+    state session_id = _init_session_id
+    state notify_channel = _init_notify_channel
+    state notify_target = _init_notify_target
+    state draft = nil
+
+    step init {
+        mem.put("research/\(session_id)/meta", {"question": question})
+        return session_id
+    }
+
+    step gather_web after init {
+        return gather_sources(question, 5i)
+    }
+
+    step gather_code after init {
+        let q = "\(question) code examples"
+        return gather_sources(q, 3i)
+    }
+
+    step gather_data after init {
+        let q = "\(question) research data"
+        return gather_sources(q, 3i)
+    }
+
+    step analyze after gather_web, gather_code, gather_data {
+        return {"web": gather_web, "code": gather_code, "data": gather_data}
+    }
+
+    step draft_step after analyze {
+        checkpoint "before_draft"
+        let p = workflow_resume_payload()
+        let fb = ""
+        if (p != nil) {
+            fb = p["feedback"]
+        }
+        let analysis_json = json.stringify(analyze)
+        let r = json.parse(json.stringify(tool.call("research.synthesize", {"question": question, "analysis": analysis_json, "feedback": fb})))
+        let new_draft = r["draft"]
+        draft = new_draft
+        mem.put("research/\(session_id)/draft", new_draft)
+        return new_draft
+    }
+
+    step review after draft_step {
+        return workflow_wait("approval_required", session_id, {"draft": draft, "session_id": session_id})
+    }
+
+    step publish after review {
+        let _wr = tool.call("research.write_file", {"path": "output/\(session_id)/final.md", "content": draft, "format": "markdown"})
+        let _nr = tool.call("research.notify", {"channel": notify_channel, "target": notify_target, "message": "Research complete: \(question)", "run_id": session_id})
+        mem.put("research/\(session_id)/final", draft)
+        return {"published": true, "session_id": session_id}
+    }
+}
+
+// ── test suite ─────────────────────────────────────────────────────────────
+
+t.suite("research_task workflow", fn() {
+
+    t.case("first run suspends at review with status waiting", fn() {
+        let r = run_workflow(research_task)
+        t.assert_eq(r["status"], "waiting", nil)
+        t.assert_eq(r["wait"]["event_type"], "approval_required", nil)
+    })
+
+    t.case("waiting result includes graph_id", fn() {
+        let r = run_workflow(research_task)
+        t.assert(r["graph_id"] != nil, "graph_id must be present")
+        t.assert_eq(type(r["graph_id"]), "string", nil)
+    })
+
+    t.case("draft state is non-nil after first run", fn() {
+        let r = run_workflow(research_task)
+        let d = r["state"]["draft"]
+        t.assert(d != nil, "draft must be set")
+        t.assert_eq(type(d), "string", nil)
+    })
+
+    t.case("resume with approval completes to publish", fn() {
+        let r1 = run_workflow(research_task)
+        let gid = r1["graph_id"]
+        let r2 = resume_workflow(gid, {"approved": true})
+        t.assert_eq(r2["steps"]["publish"]["published"], true, nil)
+    })
+
+    t.case("checkpoint replay produces a different draft", fn() {
+        let r1 = run_workflow(research_task)
+        let gid = r1["graph_id"]
+        let draft1 = r1["state"]["draft"]
+        let r2 = resume_workflow(gid, "before_draft", {"feedback": "needs citations"})
+        let draft2 = r2["state"]["draft"]
+        t.assert_neq(draft1, draft2, nil)
+    })
+
+    t.case("checkpoint replay re-suspends at review", fn() {
+        let r1 = run_workflow(research_task)
+        let gid = r1["graph_id"]
+        let r2 = resume_workflow(gid, "before_draft", {"feedback": "add more detail"})
+        t.assert_eq(r2["status"], "waiting", nil)
+        t.assert_eq(r2["wait"]["event_type"], "approval_required", nil)
+    })
+
+    t.case("full iteration: reject then approve", fn() {
+        let r1 = run_workflow(research_task)
+        let gid = r1["graph_id"]
+        let r2 = resume_workflow(gid, "before_draft", {"feedback": "revise this"})
+        t.assert_eq(r2["status"], "waiting", nil)
+        let r3 = resume_workflow(gid, {"approved": true})
+        t.assert_eq(r3["steps"]["publish"]["published"], true, nil)
+    })
+
+    t.case("memory contains session meta after run", fn() {
+        let r = run_workflow(research_task)
+        let meta = mem.get("research/\(_init_session_id)/meta")
+        t.assert(meta != nil, "meta must be stored")
+        t.assert_eq(meta["question"], _init_question, nil)
+    })
+
+    t.case("memory draft matches workflow state draft", fn() {
+        let r = run_workflow(research_task)
+        let stored = mem.get("research/\(_init_session_id)/draft")
+        t.assert(stored != nil, "draft must be stored in memory")
+        t.assert_eq(stored, r["state"]["draft"], nil)
+    })
+})

@@ -1,0 +1,21 @@
+workflow wait_test {
+    state captured = nil
+
+    step pause {
+        return workflow_wait("approval_required", "c1", {"draft": "hello"})
+    }
+
+    step check after pause {
+        let p = workflow_resume_payload()
+        captured = p
+        return p
+    }
+}
+
+let r1 = run_workflow(wait_test)
+print(r1["status"])
+let gid = r1["graph_id"]
+
+let r2 = resume_workflow(gid, {"approved": true, "note": "lgtm"})
+print(r2["steps"]["check"])
+print(r2["state"]["captured"])

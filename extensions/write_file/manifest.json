@@ -1,0 +1,10 @@
+{
+  "name": "research.write_file",
+  "description": "Write final output to a file in the workspace.",
+  "version": "1.0",
+  "sandbox_tier": "container",
+  "schema": { "path": "string", "content": "string", "format": "string" },
+  "returns_schema": { "written_bytes": "int", "path": "string" },
+  "effects": ["fs.write"],
+  "provenance": { "trust_class": "trusted", "origin": "local" }
+}
