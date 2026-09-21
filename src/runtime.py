@@ -1,8 +1,8 @@
 """Python host for the research agent.
 
 Manages NodusRuntime lifecycle, tool registration, and the start/resume
-iteration protocol.  Extension handlers are stubs — replace with real
-Docker-dispatch logic before production use.
+iteration protocol.  Extension handlers dispatch to the real implementations
+in ``src/web.py``, ``src/sandbox.py`` and ``src/notify.py``.
 """
 from __future__ import annotations
 
@@ -10,6 +10,14 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+
+# Workflow run store: SQLite (crash-safe; the Nodus 6.0 default) rather than
+# the file-backed JSON store that 5.x still defaults to.  Durable
+# human-in-the-loop resume is this host's whole point, so choose explicitly —
+# an unchosen backend is exactly what the 6.0 flip strands runs on (#174).
+# Must be set before the first workflow runner is created; honours an
+# explicit override from the environment.
+os.environ.setdefault("NODUS_WORKFLOW_STORE_BACKEND", "sqlite")
 
 from nodus.runtime.embedding import NodusRuntime
 from nodus.orchestration.task_graph import get_registered_vm
@@ -250,8 +258,24 @@ class ResearchRuntime:
         return self._resume_on_vm(run_id, None, payload)
 
     def resume_with_feedback(self, run_id: str, feedback: str) -> dict:
-        """Replay from the 'before_draft' checkpoint with feedback for revision."""
-        return self._resume_on_vm(run_id, "before_draft", {"feedback": feedback})
+        """Reject the draft and replay from the 'before_draft' checkpoint with feedback."""
+        return self._reject_and_replay(run_id, feedback, self._resume_on_vm)
+
+    def _reject_and_replay(self, run_id: str, feedback: str, resume) -> dict:
+        """Two-phase rejection, as Nodus v5 requires (#482).
+
+        A checkpoint rollback on a run that is *waiting* is refused in v5: the
+        rollback would re-enter ``review``, re-arm the wait and drop the payload.
+        So a rejection is (1) satisfy the wait with ``approved: false`` — the
+        run completes with ``publish`` gated off, no side effects — then (2) roll
+        back to ``before_draft`` carrying the feedback, which replays the draft
+        and re-suspends at ``review``.  Both phases go through ``resume`` so the
+        in-process and fresh-process paths behave identically.
+        """
+        rejected = resume(run_id, None, {"approved": False, "feedback": feedback})
+        if isinstance(rejected, dict) and rejected.get("ok") is False:
+            return rejected
+        return resume(run_id, "before_draft", {"feedback": feedback})
 
     def resume_in_fresh_process(self, run_id: str, payload: dict, *, checkpoint: str | None = None) -> dict:
         """Resume a persisted run as if from a brand-new process.
@@ -267,9 +291,33 @@ class ResearchRuntime:
         approval store (the default ``FileApprovalStore``) so an approval
         recorded elsewhere is visible here.
         """
+        if checkpoint is not None and "feedback" in payload:
+            return self._reject_and_replay(run_id, payload["feedback"], self._resume_fresh)
+        return self._resume_fresh(run_id, checkpoint, payload)
+
+    def _resume_fresh(self, run_id: str, checkpoint: str | None, payload: dict) -> dict:
         vm = self._prime_resume_vm()
-        raw = vm.builtin_resume_workflow(run_id, checkpoint, payload)
+        raw = self._resume_on_primed_vm(vm, run_id, checkpoint, payload)
         return self._runtime._to_host_value(raw)
+
+    @staticmethod
+    def _resume_on_primed_vm(vm, run_id: str, checkpoint: str | None, payload: dict):
+        """Resume ``run_id`` with the rebuild targeting *this* primed VM.
+
+        Nodus v5's ``builtin_resume_workflow`` routes a rebuild away from any VM
+        that has a program loaded (``_resume_target_vm``, #328) onto a child VM
+        that inherits host globals and builtins — but **not** ``tool_registry``.
+        On that child, ``tool.call`` fails soft with ``tool_not_found`` and the
+        resumed ``publish`` silently does nothing.  A primed VM has *finished*
+        its program (``_prime_vm()`` is its last statement), so there is no
+        continuation to clobber; hand it to the runner directly, exactly as the
+        builtin does for a bare VM, and the tools stay bound.
+        """
+        return vm.resolve_workflow_runner().resume_workflow(
+            vm, run_id, checkpoint,
+            resume_payload=payload,
+            rebuild_graph=vm._rebuild_workflow_graph,
+        )
 
     def _prime_resume_vm(self):
         """Build a fresh VM with the workflow's imports + this host's tools bound.
@@ -296,15 +344,17 @@ class ResearchRuntime:
         task-graph registry, with imports already bound — reuse it directly.
 
         Fallback (cross-process / VM evicted): no registered VM, so prime a fresh
-        one and let ``builtin_resume_workflow`` rebuild the graph via the v4.0.7
-        ``_rebuild_workflow_graph``, which re-binds the workflow's imports.  (This
+        one and let ``builtin_resume_workflow`` rebuild the graph (v4.0.7+
+        rebuilds through the module-load path, which re-binds the workflow's imports).  (This
         used to be impossible: the pre-4.0.7 rebuild path used ``compile_only``,
         which was import-blind, so the rebuilt VM lacked ``tool``/``mem``/``json``.)
         """
         vm = get_registered_vm(run_id)
         if vm is None:
             vm = self._prime_resume_vm()
-        raw = vm.builtin_resume_workflow(run_id, checkpoint, payload)
+            raw = self._resume_on_primed_vm(vm, run_id, checkpoint, payload)
+        else:
+            raw = vm.builtin_resume_workflow(run_id, checkpoint, payload)
         return self._runtime._to_host_value(raw)
 
     def gate_approve(self, request_id: str, approver_id: str = "human") -> None:

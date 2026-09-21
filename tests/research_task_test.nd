@@ -90,11 +90,39 @@ workflow research_task {
     }
 
     step publish after review {
+        // The approval payload that satisfied `review`'s wait lands here (v5:
+        // a checkpoint rollback on a *waiting* run is refused, so a rejection
+        // first satisfies the wait with approved=false, then rolls back to
+        // "before_draft"). Gate every side effect on an explicit approval.
+        let approval = workflow_resume_payload()
+        let approved = false
+        if (approval != nil) {
+            if (has_key(approval, "approved")) {
+                approved = approval["approved"] == true
+            }
+        }
+        if (!approved) {
+            return {"published": false, "session_id": session_id, "revision_requested": true}
+        }
         let _wr = tool.call("research.write_file", {"path": "output/\(session_id)/final.md", "content": draft, "format": "markdown"})
+        if (type(_wr) == "error") {
+            // tool.call fails soft (e.g. tool_not_found on a VM without the
+            // registry) -- surface it rather than report a phantom publish.
+            throw "publish: research.write_file failed: \(str(_wr))"
+        }
         let _nr = tool.call("research.notify", {"channel": notify_channel, "target": notify_target, "message": "Research complete: \(question)", "run_id": session_id})
         mem.put("research/\(session_id)/final", draft)
         return {"published": true, "session_id": session_id}
     }
+}
+
+// Two-phase rejection (Nodus v5, #482): a checkpoint rollback on a *waiting*
+// run is refused, so first satisfy the wait with approved=false (publish is
+// gated off), then roll back to "before_draft" carrying the feedback.
+// Mirrors ResearchRuntime._reject_and_replay in src/runtime.py.
+fn reject_draft(gid, feedback) {
+    let _rejected = resume_workflow(gid, {"approved": false, "feedback": feedback})
+    return resume_workflow(gid, "before_draft", {"feedback": feedback})
 }
 
 // ── test suite ─────────────────────────────────────────────────────────────
@@ -127,11 +155,19 @@ t.suite("research_task workflow", fn() {
         t.assert_eq(r2["steps"]["publish"]["published"], true, nil)
     })
 
+    t.case("rejecting the draft does not publish", fn() {
+        let r1 = run_workflow(research_task)
+        let gid = r1["graph_id"]
+        let r2 = resume_workflow(gid, {"approved": false, "feedback": "needs citations"})
+        t.assert_eq(r2["steps"]["publish"]["published"], false, nil)
+        t.assert_eq(r2["steps"]["publish"]["revision_requested"], true, nil)
+    })
+
     t.case("checkpoint replay produces a different draft", fn() {
         let r1 = run_workflow(research_task)
         let gid = r1["graph_id"]
         let draft1 = r1["state"]["draft"]
-        let r2 = resume_workflow(gid, "before_draft", {"feedback": "needs citations"})
+        let r2 = reject_draft(gid, "needs citations")
         let draft2 = r2["state"]["draft"]
         t.assert_neq(draft1, draft2, nil)
     })
@@ -139,15 +175,23 @@ t.suite("research_task workflow", fn() {
     t.case("checkpoint replay re-suspends at review", fn() {
         let r1 = run_workflow(research_task)
         let gid = r1["graph_id"]
-        let r2 = resume_workflow(gid, "before_draft", {"feedback": "add more detail"})
+        let r2 = reject_draft(gid, "add more detail")
         t.assert_eq(r2["status"], "waiting", nil)
         t.assert_eq(r2["wait"]["event_type"], "approval_required", nil)
+    })
+
+    t.case("checkpoint rollback on a waiting run is refused (v5 #482)", fn() {
+        let r1 = run_workflow(research_task)
+        let gid = r1["graph_id"]
+        let r2 = resume_workflow(gid, "before_draft", {"feedback": "revise this"})
+        t.assert_eq(r2["ok"], false, nil)
+        t.assert_eq(r2["category"], "waiting_run_checkpoint_resume", nil)
     })
 
     t.case("full iteration: reject then approve", fn() {
         let r1 = run_workflow(research_task)
         let gid = r1["graph_id"]
-        let r2 = resume_workflow(gid, "before_draft", {"feedback": "revise this"})
+        let r2 = reject_draft(gid, "revise this")
         t.assert_eq(r2["status"], "waiting", nil)
         let r3 = resume_workflow(gid, {"approved": true})
         t.assert_eq(r3["steps"]["publish"]["published"], true, nil)

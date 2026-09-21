@@ -2,7 +2,7 @@
 
 ## Language
 
-This project uses **Nodus v4** (`nodus-lang 4.0.8`).
+This project uses **Nodus v5** (`nodus-lang 5.14.0`, upgraded from 4.0.8 on 2026-09-20).
 
 Install: `pip install nodus-lang`
 
@@ -10,8 +10,9 @@ Install: `pip install nodus-lang`
 
 ```bash
 nodus run script.nd
-nodus run --time-limit 5000 script.nd    # for workflows or anything with sleep
+nodus run --time-limit 5 script.nd       # SECONDS (v5.11+; was ms in v4) — for workflows or anything with sleep
 nodus check script.nd                    # syntax check only
+nodus check --staged script.nd           # flag changes staged for the 6.0 major
 nodus fmt script.nd                      # format in place
 nodus repl                               # interactive REPL
 ```
@@ -48,17 +49,27 @@ nodus repl                               # interactive REPL
 - Channels are language built-ins — `channel()`, `send()`, `recv()`, `close()`.
   Do not `import "std:channel"` — it does not exist.
 - Default execution deadline is 200ms wall-clock (including sleep).
-  Override: `nodus run --time-limit N script.nd`.
+  Override: `nodus run --time-limit N script.nd` — **N is seconds** in v5.
+- v5.10+: `spawn()` also accepts a zero-arg `fn() { ... }` directly (coroutine form still works).
 
 **Workflows**
 - Workflow results are maps. Always bracket notation: `r["steps"]["step_name"]`.
 - `checkpoint` is valid inside step bodies only, not at workflow body level.
 - Step results must be JSON-serializable — return maps `{"k": v}`, not records `{k: v}`.
 - `retry_delay_ms > 0` makes retries async. For synchronous retry, use `try/catch` inside the step body.
+- **v5 (#482): `resume_workflow(id, "checkpoint", payload)` is REFUSED while the run is
+  waiting on `workflow_wait` (`category: "waiting_run_checkpoint_resume"`).** To reject
+  and revise: first `resume_workflow(id, {"approved": false, ...})` to satisfy the wait
+  (gate `publish` on the payload so it no-ops), then `resume_workflow(id, "checkpoint", {...})`.
+- `tool.call()` fails **soft**: an unregistered tool returns a value with `type(r) == "error"`,
+  it does not throw. Check it (`if (type(r) == "error") { throw ... }`) in steps with side effects.
+- **Workflow store:** this project uses SQLite (`NODUS_WORKFLOW_STORE_BACKEND=sqlite`, set in
+  `src/runtime.py`; it is the 6.0 default). Set it in the shell for CLI runs (`nodus test`,
+  `nodus run`), or the CLI falls back to the JSON store and warns about stranded runs.
 
 ## AI coding assistant skill
 
-A Claude Code skill for Nodus v4 is available at
+A Claude Code skill for Nodus is available at (local copy in `.claude/commands/nodus` is v4-era; v5 deltas are listed above)
 [`skills/nodus.skill`](https://github.com/Masterplanner25/Nodus/raw/main/skills/nodus.skill)
 in the Nodus repo.
 

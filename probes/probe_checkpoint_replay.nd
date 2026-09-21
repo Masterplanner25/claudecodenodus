@@ -29,8 +29,14 @@ print(r1["status"])
 print(r1["state"]["draft"])
 let gid = r1["graph_id"]
 
+// Nodus v5 (#482): a checkpoint rollback on a WAITING run is refused --
+// first satisfy the wait (rejecting), then roll back with the feedback.
+let refused = resume_workflow(gid, "before_draft", {"feedback": "needs work"})
+print("--- round 2a (rollback while waiting is refused) ---")
+print(refused["category"])
+let _rej = resume_workflow(gid, {"approved": false, "feedback": "needs work"})
 let r2 = resume_workflow(gid, "before_draft", {"feedback": "needs work"})
-print("--- round 2 (checkpoint replay) ---")
+print("--- round 2b (checkpoint replay) ---")
 print(r2["status"])
 print(r2["state"]["draft"])
 

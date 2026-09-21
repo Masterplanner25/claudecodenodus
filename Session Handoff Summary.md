@@ -1,7 +1,49 @@
 # Session Handoff Summary
 
 Repo: `C:\dev\claudecodenodus` — Nodus-based autonomous research agent.
-Date: 2026-06-21 (updated 2026-07-03). Nodus: `nodus-lang 4.0.8`.
+Date: 2026-06-21 (updated 2026-09-20). Nodus: `nodus-lang 5.14.0`.
+
+> **2026-09-20 — UPGRADED Nodus 4.0.8 → 5.14.0 (+ all `nodus-*` companions).**
+> Suites: **Python 68/68, Nodus 11/11 (+2), `nodus check` OK, `nodus check
+> --staged` 4/4 checkable v6 flips OK** (record-equality: no runtime warnings
+> fired under `NODUS_STAGED_FLIP_REPORT`). Three things broke and were fixed:
+>
+> 1. **Reject-with-feedback loop (v5 #482).** v5 *refuses*
+>    `resume_workflow(id, "before_draft", payload)` while the run is waiting on
+>    `workflow_wait` (`category: waiting_run_checkpoint_resume`). Rejection is
+>    now two-phase — `ResearchRuntime._reject_and_replay`: (1) satisfy the wait
+>    with `{approved:false, feedback}`; `publish` now **gates every side effect
+>    on `workflow_resume_payload()["approved"] == true`** and returns
+>    `{"published": false, "revision_requested": true}` otherwise; (2) roll back
+>    to `before_draft` with the feedback → draft replays, re-suspends at review.
+>    `resume_with_feedback` and `resume_in_fresh_process(checkpoint=)` both use it.
+>    Nodus test has a mirrored `reject_draft()` helper + a test pinning the refusal.
+> 2. **Cross-process resume lost its tools (v5 #328).** v5's
+>    `builtin_resume_workflow` → `_resume_target_vm` diverts the rebuild off any VM
+>    with a program loaded onto a child VM that inherits host globals/builtins but
+>    **not `tool_registry`**. `tool.call` then failed *soft* (`tool_not_found`),
+>    and `publish` reported `published: true` with no file written. Fix:
+>    `_resume_on_primed_vm` hands the primed VM to
+>    `vm.resolve_workflow_runner().resume_workflow(...)` directly (the primed VM's
+>    program has finished; nothing to clobber). Plus `publish` now `throw`s if
+>    `type(_wr) == "error"` so a phantom publish can't recur.
+> 3. **Workflow store.** Explicitly SQLite (`os.environ.setdefault(
+>    "NODUS_WORKFLOW_STORE_BACKEND", "sqlite")` at the top of `src/runtime.py`;
+>    v6 default). Local JSON records migrated (`nodus workflow migrate-store`);
+>    the old dir is at `.nodus/workflow_framework/runs.json-backup-2026-09-20`
+>    (gitignored, all test residue — delete when convenient). **For CLI runs
+>    (`nodus test`/`nodus run`) set `NODUS_WORKFLOW_STORE_BACKEND=sqlite` in the
+>    shell**, or the CLI writes to the JSON store and re-triggers the warning.
+>
+> Other v5 notes: `--time-limit` is now **seconds**; `spawn()` accepts a bare
+> `fn(){}`; `copy()`, `sleep_until`, `spawn_after`, `std:loop`, `std:runtime.
+> capabilities()` exist; `nodus check --staged` previews the 6.0 breaks. Two
+> upstream-worthy findings: (a) the "stranded runs" warning counts raw files but
+> `migrate-store` lists via `list_runs()`, which drops files older than
+> `terminal_max_age_days` → 435 records were "stranded" but unmigratable;
+> (b) the #328 child VM should inherit `tool_registry` (or `#482` should document
+> the host-side resume path). Rollback: `pip install -r` the pre-upgrade freeze
+> (was in the session scratchpad) or `pip install nodus-lang==4.0.8 nodus-extension==0.1.0 nodus-mcp==0.1.0`.
 
 > **2026-07-04 (later) — data plane FULLY REAL, no mocks left.** `research.notify`
 > is now real (`src/notify.py::HttpNotifier`): channel dispatch — `console`
@@ -153,8 +195,8 @@ don't regress it.
 ## How to run
 
 ```bash
-PYTHONPATH=. venv/Scripts/python -m pytest tests/ -q   # 31 Python tests
-venv/Scripts/nodus test tests/                          # 9 Nodus tests
+PYTHONPATH=. venv/Scripts/python -m pytest tests/ -q   # 68 Python tests (SQLite store chosen in src/runtime.py)
+NODUS_WORKFLOW_STORE_BACKEND=sqlite venv/Scripts/nodus test tests/   # 11 Nodus tests
 venv/Scripts/nodus check workflows/research_task.nd     # syntax
 # Approval API (manual): python -m src.approval_api  → http://127.0.0.1:8000
 ```

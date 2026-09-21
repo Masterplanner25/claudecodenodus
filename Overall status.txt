@@ -1,5 +1,11 @@
 Overall status
 
+  UPDATE 2026-09-20: upgraded to Nodus 5.14.0 (from 4.0.8). Suites: Python 68/68, Nodus 11/11, check OK,
+  staged-6.0 checks OK. v5 refuses checkpoint rollback on a waiting run, so the reject loop is now
+  two-phase (satisfy wait with approved=false → publish no-ops → roll back with feedback); cross-process
+  resume goes through the runner directly so the primed VM keeps its tool registry; workflow store is
+  SQLite. Details in "Session Handoff Summary.md" (2026-09-20 block).
+
   UPDATE 2026-07-04: the data plane is now FULLY REAL — there are no mock tools left. All five tools are
   real and live-verified: web_search + fetch_doc (real HTTP; fetch wired into the DAG), run_code (hardened
   Docker sandbox, verified against a live daemon), LLM synthesis (real, via claude-opus-4-8), and

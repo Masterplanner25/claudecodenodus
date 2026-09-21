@@ -100,8 +100,10 @@ workflow research_task {
 
   step publish after review {
     // both tools below are gated (declared effects: fs.write / network.write)
-    let p = workflow_resume_payload()
-    // p["approved"] == true at this point (caller only resumes here with approval)
+    let p = workflow_resume_payload()      // the payload that satisfied review's wait
+    // Gate EVERY side effect on p["approved"] == true: a rejection also passes
+    // through here (see protocol below) and must be a no-op.
+    if (!approved) { return {"published": false, "revision_requested": true} }
     action tool "research.write_file" with { path: ..., content: state.draft }
     action tool "research.notify" with { channel: ..., message: ... }
   }
@@ -114,14 +116,22 @@ workflow research_task {
 run_workflow(research_task, {question: "...", session_id: "..."})
   → status "waiting" — human sees draft
 
-if rejected:
-  resume_workflow(run_id, "before_draft", {approved: false, feedback: "..."})
-  → loops draft_step + review, status "waiting" again
+if rejected (two resumes — Nodus v5 #482):
+  resume_workflow(run_id, {approved: false, feedback: "..."})
+  → satisfies the wait; publish sees approved=false and no-ops; run completes
+  resume_workflow(run_id, "before_draft", {feedback: "..."})
+  → rolls back, replays draft_step + review, status "waiting" again
 
 if approved:
   resume_workflow(run_id, {approved: true})
   → publish runs to completion
 ```
+
+> **Why two calls (Nodus ≥ 5.0):** a checkpoint rollback on a run that is
+> *waiting* is refused (`category: waiting_run_checkpoint_resume`) — the engine
+> would re-enter `review`, re-arm the wait and drop the payload. The v4 one-call
+> form `resume_workflow(id, "before_draft", {feedback})` no longer works on a
+> waiting run. `ResearchRuntime._reject_and_replay` encapsulates the pair.
 
 The loop is managed by the Python caller, not inside Nodus. Each `resume_workflow` call is
 synchronous. The workflow run_id is stable across all iterations.
@@ -259,7 +269,7 @@ ApprovalPolicy.require_for_effects(["network.write", "fs.write"])
 | Gather granularity | Separate steps per domain | Different failure modes and timeouts per domain; fail-open per step keeps analyze simple |
 | Memory scheme | Path-primary + tags | content_hash is both memory address and @exactly_once action_id |
 | Approval interaction | workflow_wait() + resume_workflow() | workflow_wait() returns sentinel that suspends the DAG; resume_workflow() delivers payload read via workflow_resume_payload() in subsequent steps |
-| Draft-review loop | checkpoint replay in single workflow | Goals have no loop mechanism (DAG, runs once). yield crashes in workflow steps. Checkpoint "before_draft" + resume_workflow(id, "before_draft", {feedback}) re-runs draft_step through to the next review suspension. |
+| Draft-review loop | checkpoint replay in single workflow | Goals have no loop mechanism (DAG, runs once). yield crashes in workflow steps. Rejection = satisfy the wait with `{approved:false, feedback}` (publish gated off), then `resume_workflow(id, "before_draft", {feedback})` re-runs draft_step through to the next review suspension. (v5 refuses the rollback while the run is still waiting.) |
 | Iteration control | Python caller, not Nodus | The loop is managed outside Nodus — Python checks approved flag and decides whether to replay checkpoint or proceed to publish. |
 | Feedback path | workflow_resume_payload() in draft_step | After checkpoint rollback, the replayed draft_step reads workflow_resume_payload() to get the feedback from the previous rejection. |
 | Gate mechanism | Effect-based, not name-based | New tools with write effects are automatically gated; no allowlist maintenance |
@@ -301,6 +311,7 @@ ApprovalPolicy.require_for_effects(["network.write", "fs.write"])
 - Extension manifests: all 5 created under `extensions/*/manifest.json` and made load-bearing via `src/runtime.py::load_tool_manifests()`. NB: `schema` uses the confirmed-working Nodus type names (`"int"`, not the `"integer"` shown above) since the runtime feeds it to tool registration; `returns_schema` stays declarative.
 - Approval API: `src/approval_api.py` — `ApprovalService` + stdlib `http.server` adapter (no third-party web framework). The draft `review` step is the human authorization for `publish`'s writes, so the service runtime defaults to an auto-approve effect policy; the effect gate (durable `FileApprovalStore`, `src/approval_store.py`) is exposed under `/gate/*` for stricter, out-of-flow tool approvals.
 - Durable cross-process resume: enabled by Nodus v4.0.7 (issue #285 / PR #286); `ResearchRuntime.resume_in_fresh_process()` + `FileApprovalStore`. See `.nodus/learnings.md`.
+- Nodus v5 (5.14.0, upgraded 2026-09-20): the v5 `builtin_resume_workflow` diverts a rebuild off any VM with a program loaded onto a child VM that does not inherit `tool_registry`; the host resumes a primed VM through the runner directly (`ResearchRuntime._resume_on_primed_vm`). Workflow store is SQLite, chosen explicitly in `src/runtime.py` (the 6.0 default).
 
 ---
 

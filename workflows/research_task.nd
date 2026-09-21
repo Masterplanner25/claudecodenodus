@@ -75,7 +75,26 @@ workflow research_task {
     }
 
     step publish after review {
+        // The approval payload that satisfied `review`'s wait lands here (v5:
+        // a checkpoint rollback on a *waiting* run is refused, so a rejection
+        // first satisfies the wait with approved=false, then rolls back to
+        // "before_draft"). Gate every side effect on an explicit approval.
+        let approval = workflow_resume_payload()
+        let approved = false
+        if (approval != nil) {
+            if (has_key(approval, "approved")) {
+                approved = approval["approved"] == true
+            }
+        }
+        if (!approved) {
+            return {"published": false, "session_id": session_id, "revision_requested": true}
+        }
         let _wr = tool.call("research.write_file", {"path": "output/\(session_id)/final.md", "content": draft, "format": "markdown"})
+        if (type(_wr) == "error") {
+            // tool.call fails soft (e.g. tool_not_found on a VM without the
+            // registry) -- surface it rather than report a phantom publish.
+            throw "publish: research.write_file failed: \(str(_wr))"
+        }
         let _nr = tool.call("research.notify", {"channel": notify_channel, "target": notify_target, "message": "Research complete: \(question)", "run_id": session_id})
         mem.put("research/\(session_id)/final", draft)
         return {"published": true, "session_id": session_id}
