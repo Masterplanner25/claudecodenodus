@@ -42,7 +42,9 @@ Date: 2026-06-21 (updated 2026-09-20). Nodus: `nodus-lang 5.14.0`.
 > `migrate-store` lists via `list_runs()`, which drops files older than
 > `terminal_max_age_days` → 435 records were "stranded" but unmigratable;
 > (b) the #328 child VM should inherit `tool_registry` (or `#482` should document
-> the host-side resume path). Rollback: `pip install -r` the pre-upgrade freeze
+> the host-side resume path). **All upstream items — including the still-pending
+> `ApprovalPolicy.require_for_effects` PR — are written up with verified repros in
+> `docs/upstream-handoff.md`** (repro script: `probes/repro_v5_child_vm_tool_registry.py`). Rollback: `pip install -r` the pre-upgrade freeze
 > (was in the session scratchpad) or `pip install nodus-lang==4.0.8 nodus-extension==0.1.0 nodus-mcp==0.1.0`.
 
 > **2026-07-04 (later) — data plane FULLY REAL, no mocks left.** `research.notify`
