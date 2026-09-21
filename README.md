@@ -107,6 +107,8 @@ rehydrating process must re-supply them, and `ResearchRuntime.__init__` does.
 - `probes/` — small `.nd` / `.py` scripts that pin down runtime behaviour;
   `repro_v5_child_vm_tool_registry.py` is an upstream bug repro
 - `docs/plan.md` — design; `docs/upstream-handoff.md` — findings to report
+- `.nodus/learnings.md` — running log of Nodus behaviour pinned down during
+  development (the rest of `.nodus/` is runtime state and is ignored)
 - `CLAUDE.md` — repo-local Nodus rules for Claude Code (the traps, in one page)
 - `Session Handoff Summary.md` — dated status, most recent block first
 

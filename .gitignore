@@ -10,7 +10,9 @@
 
 # generated at run time
 workspace/
-.nodus/
+**/.nodus/*
+# ...except the running log of Nodus findings, which is the point of this repo
+!.nodus/learnings.md
 
 # tooling caches
 __pycache__/
