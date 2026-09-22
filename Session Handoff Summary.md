@@ -1,7 +1,35 @@
 # Session Handoff Summary
 
 Repo: `C:\dev\claudecodenodus` — Nodus-based autonomous research agent.
-Date: 2026-06-21 (updated 2026-09-20). Nodus: `nodus-lang 5.14.0`.
+Date: 2026-06-21 (updated 2026-09-21). Nodus: `nodus-lang 5.14.0`.
+
+> **2026-09-21 — EXACT-001 RESOLVED: `@exactly_once` is durable across processes.**
+> Suites: **Python 71/71 (+3), Nodus 12/12 (+1), check + staged OK.**
+> - `nodus-retry` 0.2.0 ships `SqliteEffectStore`; `ResearchRuntime` now injects it
+>   (`<workspace>/.effects.sqlite3`) via `NodusRuntime.set_effect_store()` *before* the
+>   first `run_source` (so both `start` and the primed cross-process VM carry it);
+>   `ResearchRuntime(effect_store=...)` injectable; closed on `shutdown()`.
+> - Workflow: publish's external effects (write_file + notify) moved into top-level
+>   `@exactly_once fn publish_once(session_id, draft, question, channel, target)`;
+>   the step keeps the approval gate and `mem.put`, returns `{published, session_id, effects}`.
+>   Identical replayed draft -> served from the store (no rewrite, no re-notify);
+>   revised draft -> new key, publishes once. A `throw` inside leaves the record
+>   pending, so failed publishes retry. Mirrored in the Nodus inline test with
+>   effect counters (`_effects`).
+> - **Finding 1 (fixed here):** rehydrated step results come back **key-sorted** (the
+>   store persists with `sort_keys=True`) while live maps keep insertion order, and
+>   `std:json.stringify` has no canonical mode -- so `json.stringify(analyze)` in
+>   `draft_step` produced a different draft string after a restart for identical
+>   findings. `_ext_synthesize` now canonicalises the analysis JSON (`_canonical_json`).
+> - **Finding 2 (upstream):** the #328 child resume VM also drops the injected
+>   `effect_store` (fresh `InMemoryEffectStore`), same class as the `tool_registry`
+>   gap -- our runner-direct resume path avoids both. Both findings are in
+>   `docs/upstream-handoff.md`.
+> - Verified empirically (scratch probes, not committed): two OS processes share one
+>   store -> second gets the cached result with zero executions; pre-seeded `pending`
+>   row (crash mid-effect) -> re-executes; no store -> per-VM (the original EXACT-001).
+> - Design note: the plan's "content_hash as `@exactly_once` action_id" conflated a cache
+>   key with an idempotency key; `plan.md` revised.
 
 > **2026-09-20 — UPGRADED Nodus 4.0.8 → 5.14.0 (+ all `nodus-*` companions).**
 > Suites: **Python 68/68, Nodus 11/11 (+2), `nodus check` OK, `nodus check
@@ -161,7 +189,7 @@ docs/plan.md      ← design doc (open-items updated)
    set; otherwise a deterministic string. Never run against a live model here.
 3. **`src/memory.py`** — listed in plan, not created (memory is inline via
    `std:memory`; tag-based cross-session recall not wired).
-4. **`@exactly_once` is per-VM only** (EXACT-001) — idempotency doesn't survive
+4. ~~**`@exactly_once` is per-VM only** (EXACT-001)~~ RESOLVED 2026-09-21 (see top). Was: idempotency doesn't survive
    restart; fine for single-session.
 
 The remaining work is integration, not invention: the tool contracts (manifests +
@@ -175,8 +203,8 @@ handler signatures) are fixed, so real implementations are drop-in.
 `fetch_doc`~~ ✅ (live). ~~`run_code` Docker sandbox~~ ✅ (live-verified). ~~wire
 `fetch_doc` into the DAG~~ ✅. ~~flip the LLM online~~ ✅ (live via
 `claude-opus-4-8`). ~~make `research.notify` real~~ ✅ (multi-channel, live-verified
-end-to-end). No mock tools remain. **Residual non-tool gaps (optional):** EXACT-001
-(`@exactly_once` per-VM only, not distributed-durable) and the unbuilt tag-based
+end-to-end). No mock tools remain. **Residual non-tool gaps (optional):** ~~EXACT-001~~ (resolved
+2026-09-21, durable `SqliteEffectStore`) and the unbuilt tag-based
 cross-session recall (`src/memory.py`; memory is inline via `std:memory`).
 
 Follow-up worth upstreaming: `ApprovalPolicy.require_for_effects` as a real

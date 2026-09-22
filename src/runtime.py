@@ -23,6 +23,7 @@ from nodus.runtime.embedding import NodusRuntime
 from nodus.orchestration.task_graph import get_registered_vm
 from nodus_approvals import ApprovalGate
 from nodus_llm import CredentialProfile, CredentialStore, FailoverClient
+from nodus_retry import SqliteEffectStore
 
 from src.approval_store import FileApprovalStore
 from src.policy import require_for_effects
@@ -132,7 +133,7 @@ class ResearchRuntime:
         # or: result2 = rt.resume_with_feedback(run_id, "needs more detail")
     """
 
-    def __init__(self, *, workspace: str | None = None, policy=None, store=None, llm_client=_AUTO_LLM, web_backend=_AUTO_WEB, code_runner=_AUTO_CODE, notifier=_AUTO_NOTIFY) -> None:
+    def __init__(self, *, workspace: str | None = None, policy=None, store=None, effect_store=None, llm_client=_AUTO_LLM, web_backend=_AUTO_WEB, code_runner=_AUTO_CODE, notifier=_AUTO_NOTIFY) -> None:
         self.workspace = Path(workspace) if workspace else Path.cwd() / "workspace"
         self.workspace.mkdir(parents=True, exist_ok=True)
         (self.workspace / "output").mkdir(exist_ok=True)
@@ -143,6 +144,13 @@ class ResearchRuntime:
         # process (the agent's whole point) sees the same approval state.
         self._store = store if store is not None else FileApprovalStore(self.workspace / ".approvals")
         self._gate = ApprovalGate(policy=self._policy, store=self._store)
+        # Durable idempotency for ``@exactly_once`` (EXACT-001).  The annotation
+        # dedups per VM unless the host injects a persistent EffectStore, so
+        # without this a retry after a crash mid-publish -- in a new process --
+        # would write and notify again.  SQLite under the workspace, like the
+        # approval store: an effect recorded here is visible to every process
+        # that resumes this workspace.  ``:memory:`` or InMemoryEffectStore for tests.
+        self._effect_store = effect_store if effect_store is not None else SqliteEffectStore(str(self.workspace / ".effects.sqlite3"))
         self._llm_client = build_llm_client() if llm_client == _AUTO_LLM else llm_client
         # Real HTTP backend by default; tests/offline mode inject OfflineWebBackend.
         self._web_backend = build_web_backend() if web_backend == _AUTO_WEB else web_backend
@@ -158,6 +166,9 @@ class ResearchRuntime:
             allow_network=True,
             allow_subprocess=False,
         )
+        # Must precede the first run_source: the store is attached to each VM
+        # the runtime builds (start AND the primed cross-process resume VM).
+        self._runtime.set_effect_store(self._effect_store)
 
         # Cache workflow source so vm.source_code can be set before run_workflow runs.
         # This lets _rebuild_workflow_graph find the source across run_source boundaries.
@@ -306,7 +317,8 @@ class ResearchRuntime:
 
         Nodus v5's ``builtin_resume_workflow`` routes a rebuild away from any VM
         that has a program loaded (``_resume_target_vm``, #328) onto a child VM
-        that inherits host globals and builtins — but **not** ``tool_registry``.
+        that inherits host globals and builtins — but **not** ``tool_registry``
+        nor the injected ``effect_store`` (it gets a fresh per-VM one).
         On that child, ``tool.call`` fails soft with ``tool_not_found`` and the
         resumed ``publish`` silently does nothing.  A primed VM has *finished*
         its program (``_prime_vm()`` is its last statement), so there is no
@@ -372,6 +384,9 @@ class ResearchRuntime:
             self._web_backend.close()
         if self._notifier is not None:
             self._notifier.close()
+        close = getattr(self._effect_store, "close", None)
+        if close is not None:
+            close()
         self._runtime.shutdown()
         NodusRuntime.clear_shared_state()
 
@@ -459,6 +474,23 @@ _SYNTH_SYSTEM = (
 )
 
 
+def _canonical_json(text: str) -> str:
+    """Re-serialise a JSON document with sorted keys and fixed separators.
+
+    Step results rehydrated from the workflow store come back key-sorted (the
+    store persists with ``sort_keys=True``), while a live run's maps keep
+    insertion order, and ``std:json.stringify`` has no canonical mode.  The
+    draft embeds the analysis, and the draft is part of ``publish_once``'s
+    idempotency key — so the same findings must serialise to the same bytes
+    in the original process and in a rehydrated one.  Non-JSON input is
+    returned unchanged.
+    """
+    try:
+        return json.dumps(json.loads(text), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return text
+
+
 def _ext_synthesize(args: dict, *, llm_client=None) -> dict:
     """Produce a research draft from gathered findings.
 
@@ -467,7 +499,7 @@ def _ext_synthesize(args: dict, *, llm_client=None) -> dict:
     tested — without credentials.  Returns ``{"draft": <markdown>}``.
     """
     question = args.get("question", "")
-    analysis = args.get("analysis", "")
+    analysis = _canonical_json(args.get("analysis", ""))
     feedback = args.get("feedback", "") or ""
 
     if llm_client is None:

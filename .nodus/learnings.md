@@ -59,3 +59,15 @@ In `src/runtime.py` the `research.synthesize` tool (effect `llm.complete`, ungat
 **`nodus check --staged file.nd`** previews the 6.0 breaking flips; run the suites with `NODUS_STAGED_FLIP_REPORT=<path>` to catch the runtime-only one (record equality).
 
 **Companion pins.** `nodus-extension` / `nodus-mcp` 0.1.0 pin `nodus-lang<5`; upgrade them (0.1.2 / 0.1.4) alongside or `pip check` fails.
+
+## 2026-09-21 — @exactly_once durability (EXACT-001 resolved)
+
+**`@exactly_once` is per-VM unless the host injects a store.** `nodus-retry` 0.2.0 ships `SqliteEffectStore(path)`; call `runtime.set_effect_store(store)` BEFORE the first `run_source` and every VM the runtime builds carries it. Verified: a second OS process on the same file gets the cached result with zero executions; a `pending` row with no `complete` (crash mid-effect) re-executes; without a store, each VM starts empty.
+
+**Key = fn name + args map (`effect_action_id(name, {params}, "default")`).** Cached return is stored as `{"result": v}` via `json.dumps` — return maps, not records. Works on a top-level fn called from a workflow step. A `throw` inside skips `effect_complete`, so failures retry.
+
+**The #328 child resume VM drops the injected `effect_store` too** (fresh `InMemoryEffectStore`), alongside `tool_registry`. Resume a primed VM through the runner directly.
+
+**Rehydrated step results are key-sorted.** The run store persists with `sort_keys=True`; live maps keep insertion order; `std:json.stringify` has no sort option. `json.stringify(prior_step_result)` therefore differs after a restart for identical content — canonicalise on the host before using it as an identity. (Bit us: an exactly-once publish keyed on the draft text re-fired on a rehydrated replay.)
+
+**Shared VM = shared effect store in `nodus test`.** All cases in one `*_test.nd` share the per-VM store, so an `@exactly_once` fn called with identical args in two cases is cached across them. Use case-unique inputs.

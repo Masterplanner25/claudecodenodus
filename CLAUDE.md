@@ -63,6 +63,13 @@ nodus repl                               # interactive REPL
   (gate `publish` on the payload so it no-ops), then `resume_workflow(id, "checkpoint", {...})`.
 - `tool.call()` fails **soft**: an unregistered tool returns a value with `type(r) == "error"`,
   it does not throw. Check it (`if (type(r) == "error") { throw ... }`) in steps with side effects.
+- `@exactly_once` dedups **per VM** unless the host calls `runtime.set_effect_store(store)` before
+  `run_source` (this project injects `nodus_retry.SqliteEffectStore`). The key is the fn name + its
+  args; the cached return must be JSON-safe (return maps). A `throw` inside leaves the record pending,
+  so failures retry rather than cache. Put it on effects with external consequences, not on fetches.
+- Step results rehydrated from the run store come back **key-sorted**; live maps keep insertion order.
+  `json.stringify` has no canonical mode, so never derive an identity/key from `json.stringify(step_result)`
+  without canonicalising on the host side first.
 - **Workflow store:** this project uses SQLite (`NODUS_WORKFLOW_STORE_BACKEND=sqlite`, set in
   `src/runtime.py`; it is the 6.0 default). Set it in the shell for CLI runs (`nodus test`,
   `nodus run`), or the CLI falls back to the JSON store and warns about stranded runs.

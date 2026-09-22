@@ -14,6 +14,7 @@ Items, most important first:
 | 2 | "Stranded runs" warning counts raw files; `migrate-store` age-filters, so old runs are reported as stranded but never migrated | bug | Medium — unclearable warning, becomes an *error* at 6.0 |
 | 3 | #482 refusal gives no recipe for reject-and-revise; two-phase pattern should be documented (or given a sanctioned API) | docs / API | Medium |
 | 4 | `ApprovalPolicy.require_for_effects` classmethod | feature (PR-ready) | Low |
+| 5 | Rehydrated step results are key-sorted; `json.stringify` has no canonical mode → strings derived from step results differ after a restart | bug / API | Low–Medium |
 
 ---
 
@@ -49,7 +50,12 @@ via runner.resume_workflow   -> {'tool_result_type': 'record', 'tool_result': 'r
 - `nodus/vm/vm.py:1662-1702` `VM._resume_target_vm`: when the graph needs a rebuild and
   `self.code` is non-empty, it builds `child = VM([], {}, host_globals=..., …)` and copies
   `host_globals`, `memory_store`, `worker_dispatcher`, `builtins` and authority
-  (`inherit_authority`) — but **not `self.tool_registry`** (`vm.py:366` initialises it to `{}`).
+  (`inherit_authority`) — but **not `self.tool_registry`** (`vm.py:366` initialises it to `{}`)
+  **and not `self.effect_store`** either (`vm.py:318` gives the child a fresh
+  `InMemoryEffectStore`), so a store injected with `NodusRuntime.set_effect_store()` is
+  silently dropped on this path and `@exactly_once` loses its durability exactly when it
+  matters (a resume in a new process). Verified: `vm._resume_target_vm(gid)` on a primed VM
+  carrying a `SqliteEffectStore` returns a child whose `effect_store` is `InMemoryEffectStore`.
 - `nodus/builtins/tool_module.py:278-289` `builtin_tool_invoke` looks tools up on
   `_root_vm(vm).tool_registry` → the child → `tool_not_found` → `make_err(...)` (a value,
   not a raise).
@@ -71,12 +77,17 @@ In `_resume_target_vm`, after `inherit_authority(child, self)`:
 ```python
 with self._tool_registry_lock:
     child.tool_registry.update(self.tool_registry)
+child.effect_store = self.effect_store
 ```
 
 (plus whatever `std:tool` binding fix the secondary symptom needs). A regression test:
 register a Python tool on a runtime, load a workflow that calls it after a
 `workflow_wait`, resume via `builtin_resume_workflow` from a second runtime, assert the
-handler ran.
+handler ran and an injected effect store was consulted.
+
+More generally: `AUTHORITY_ATTRIBUTES` (`runtime/capability.py:858`) exists precisely so
+derived VMs don't forget an attribute; a sibling list of *host-state* attributes
+(`tool_registry`, `effect_store`, …) copied at the same site would close this class of bug.
 
 ### Workaround we ship
 
@@ -201,6 +212,33 @@ One design note for the PR discussion: `nodus_lang_schema.VALID_EFFECTS`
 — coarser than the read/write split we use. Keeping the classmethod vocabulary-agnostic
 sidesteps that; if upstream wants to standardise, `filesystem` / `network` could gain
 `.read` / `.write` refinements.
+
+---
+
+## 5. Rehydrated step results are key-sorted; no canonical `json.stringify`
+
+**Affects:** 5.14.0 (likely all 5.x); `nodus_lang_workflow/store.py:592` (local) and the SQLite
+store both persist graph state with `sort_keys=True`.
+
+### Symptom
+
+A step does `let s = json.stringify(analyze)` where `analyze` is a prior step's result map.
+In the original process the map has insertion order (`web, code, data`); after a
+cross-process resume the same result comes back from the store with sorted keys
+(`code, data, web`; `snippet, title, url`). Same content, different string. Anything
+derived from it — a draft, a hash, an `@exactly_once` key — differs after a restart.
+Found because an `@exactly_once` publish keyed on the draft re-fired on a rehydrated replay
+of an identical draft.
+
+### Suggested fix (either)
+
+1. Persist without `sort_keys=True` — JSON already preserves object order, and
+   round-tripping insertion order is what makes a rehydrated run behave like the live one.
+2. Or give `std:json` a canonical mode — `json.stringify(value, {"sort_keys": true})` — and
+   document that step results are not order-stable across rehydration.
+
+Workaround we ship: the host canonicalises the JSON (`src/runtime.py::_canonical_json`)
+before it is embedded in anything identity-bearing.
 
 ---
 

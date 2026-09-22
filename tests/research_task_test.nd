@@ -9,8 +9,12 @@ tool.register({name: "research.web_search", description: "stub", handler: fn(arg
 tool.register({name: "research.fetch_doc", description: "stub", handler: fn(args) { return {"text": "stub content", "title": "Stub", "fetched_at": "2026-06-21", "content_hash": "abc123"} }, schema: {"url": "string", "max_chars": "int"}})
 tool.register({name: "research.run_code", description: "stub", handler: fn(args) { return {"stdout": "ok", "stderr": "", "exit_code": 0} }, schema: {"code": "string", "timeout_seconds": "int"}})
 tool.register({name: "research.synthesize", description: "stub", handler: fn(args) { return {"draft": "draft for \(args["question"]) fb=\(args["feedback"])"} }, schema: {"question": "string", "analysis": "string", "feedback": "string"}})
-tool.register({name: "research.write_file", description: "stub", handler: fn(args) { return {"written_bytes": 100i, "path": args["path"]} }, schema: {"path": "string", "content": "string", "format": "string"}})
-tool.register({name: "research.notify", description: "stub", handler: fn(args) { return {"delivered": true, "response": "ok"} }, schema: {"channel": "string", "target": "string", "message": "string", "run_id": "string"}})
+// side-effect counters: publish_once must fire these exactly once per distinct publish
+let _effects = {"writes": 0i, "notifies": 0i}
+tool.register({name: "research.write_file", description: "stub", handler: fn(args) { _effects["writes"] = _effects["writes"] + 1i
+    return {"written_bytes": 100i, "path": args["path"]} }, schema: {"path": "string", "content": "string", "format": "string"}})
+tool.register({name: "research.notify", description: "stub", handler: fn(args) { _effects["notifies"] = _effects["notifies"] + 1i
+    return {"delivered": true, "response": "ok"} }, schema: {"channel": "string", "target": "string", "message": "string", "run_id": "string"}})
 
 // ── module globals for workflow state init ─────────────────────────────────
 
@@ -39,6 +43,27 @@ fn gather_sources(q, n) {
 }
 
 // ── inline workflow definition ─────────────────────────────────────────────
+
+// ── publish side effects, exactly once ─────────────────────────────────────
+// The external effects of publishing (the file write, the notification) are
+// keyed on their full inputs and recorded in the host's effect store, so a
+// retry after a crash mid-publish, or a checkpoint replay that regenerates an
+// identical draft, does not fire them again -- while a *revised* draft is a
+// new key and publishes normally.  Durable only if the host injects a
+// persistent EffectStore (ResearchRuntime does: SqliteEffectStore); with the
+// default per-VM store this still dedups within one runtime.  A throw leaves
+// the record pending, so a failed publish is retried, not cached.
+@exactly_once
+fn publish_once(session_id, draft, question, channel, target) {
+    let wr = tool.call("research.write_file", {"path": "output/\(session_id)/final.md", "content": draft, "format": "markdown"})
+    if (type(wr) == "error") {
+        // tool.call fails soft (e.g. tool_not_found on a VM without the
+        // registry) -- surface it rather than report a phantom publish.
+        throw "publish: research.write_file failed: \(str(wr))"
+    }
+    let nr = tool.call("research.notify", {"channel": channel, "target": target, "message": "Research complete: \(question)", "run_id": session_id})
+    return {"written": json.parse(json.stringify(wr)), "notified": json.parse(json.stringify(nr))}
+}
 
 workflow research_task {
     state question = _init_question
@@ -104,15 +129,9 @@ workflow research_task {
         if (!approved) {
             return {"published": false, "session_id": session_id, "revision_requested": true}
         }
-        let _wr = tool.call("research.write_file", {"path": "output/\(session_id)/final.md", "content": draft, "format": "markdown"})
-        if (type(_wr) == "error") {
-            // tool.call fails soft (e.g. tool_not_found on a VM without the
-            // registry) -- surface it rather than report a phantom publish.
-            throw "publish: research.write_file failed: \(str(_wr))"
-        }
-        let _nr = tool.call("research.notify", {"channel": notify_channel, "target": notify_target, "message": "Research complete: \(question)", "run_id": session_id})
+        let effects = publish_once(session_id, draft, question, notify_channel, notify_target)
         mem.put("research/\(session_id)/final", draft)
-        return {"published": true, "session_id": session_id}
+        return {"published": true, "session_id": session_id, "effects": effects}
     }
 }
 
@@ -186,6 +205,36 @@ t.suite("research_task workflow", fn() {
         let r2 = resume_workflow(gid, "before_draft", {"feedback": "revise this"})
         t.assert_eq(r2["ok"], false, nil)
         t.assert_eq(r2["category"], "waiting_run_checkpoint_resume", nil)
+    })
+
+    t.case("publish effects fire exactly once for an identical replayed draft", fn() {
+        // NB: the suite shares one VM and therefore one effect store, so use
+        // feedback unique to this case -- the stub synthesizer folds it into
+        // the draft, which is part of publish_once's key.
+        let r1 = run_workflow(research_task)
+        let gid = r1["graph_id"]
+        let w0 = _effects["writes"]
+        let n0 = _effects["notifies"]
+        let r2 = reject_draft(gid, "exactly-once-A")
+        let r3 = resume_workflow(gid, {"approved": true})
+        t.assert_eq(r3["steps"]["publish"]["published"], true, nil)
+        t.assert_eq(_effects["writes"], w0 + 1i, nil)
+        t.assert_eq(_effects["notifies"], n0 + 1i, nil)
+        // Replay from before the draft with the SAME feedback: the draft is
+        // regenerated identically, so approving again must not re-fire.
+        let r4 = resume_workflow(gid, "before_draft", {"feedback": "exactly-once-A"})
+        t.assert_eq(r4["status"], "waiting", nil)
+        t.assert_eq(r4["state"]["draft"], r3["state"]["draft"], nil)
+        let r5 = resume_workflow(gid, {"approved": true})
+        t.assert_eq(r5["steps"]["publish"]["published"], true, nil)
+        t.assert_eq(_effects["writes"], w0 + 1i, nil)
+        t.assert_eq(_effects["notifies"], n0 + 1i, nil)
+        // A revised draft is a new publish and fires again.
+        let r6 = reject_draft(gid, "exactly-once-B")
+        let r7 = resume_workflow(gid, {"approved": true})
+        t.assert_neq(r7["state"]["draft"], r3["state"]["draft"], nil)
+        t.assert_eq(_effects["writes"], w0 + 2i, nil)
+        t.assert_eq(_effects["notifies"], n0 + 2i, nil)
     })
 
     t.case("full iteration: reject then approve", fn() {

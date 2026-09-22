@@ -159,7 +159,13 @@ research/{session_id}/revisions/{n}/timestamp
 - `domain:{web|code|data}`
 - `status:{raw|analyzed|draft|final}`
 
-The `content_hash` for source nodes is also the `@exactly_once` action_id — one identifier serves both idempotency and retrieval.
+The `content_hash` for source nodes is also the memory address for retrieval.
+
+> **Revised (2026-09-21):** `content_hash` is a *cache* key, not an idempotency key — it is only known
+> after the fetch it would guard, and re-fetching is harmless. `@exactly_once` belongs on the effects
+> with external consequences: `publish_once(session_id, draft, question, channel, target)` wraps the
+> file write + notification, keyed on its full inputs, and the host injects a durable
+> `nodus_retry.SqliteEffectStore` (see EXACT-001 below).
 
 Cross-session recall: `search_by_tags(["topic:llm-safety"])` returns relevant nodes across all sessions.
 
@@ -267,7 +273,7 @@ ApprovalPolicy.require_for_effects(["network.write", "fs.write"])
 |---|---|---|
 | LLM placement | Nodus calls LLM as a tool | Workflow shape stays fixed and auditable; LLM reasons within steps only |
 | Gather granularity | Separate steps per domain | Different failure modes and timeouts per domain; fail-open per step keeps analyze simple |
-| Memory scheme | Path-primary + tags | content_hash is both memory address and @exactly_once action_id |
+| Memory scheme | Path-primary + tags | content_hash is the memory address (a cache key; idempotency lives on `publish_once`) |
 | Approval interaction | workflow_wait() + resume_workflow() | workflow_wait() returns sentinel that suspends the DAG; resume_workflow() delivers payload read via workflow_resume_payload() in subsequent steps |
 | Draft-review loop | checkpoint replay in single workflow | Goals have no loop mechanism (DAG, runs once). yield crashes in workflow steps. Rejection = satisfy the wait with `{approved:false, feedback}` (publish gated off), then `resume_workflow(id, "before_draft", {feedback})` re-runs draft_step through to the next review suspension. (v5 refuses the rollback while the run is still waiting.) |
 | Iteration control | Python caller, not Nodus | The loop is managed outside Nodus — Python checks approved flag and decides whether to replay checkpoint or proceed to publish. |
@@ -283,7 +289,7 @@ ApprovalPolicy.require_for_effects(["network.write", "fs.write"])
 | COMPILER-001 | `@retry` annotation is a no-op — passes wrong keys to policy builder | Use `retry.call(fn(){...}, {"max_attempts": N, "backoff_ms": M})` directly |
 | VM-001 | GLOBAL_MEMORY_STORE shared across NodusRuntime instances in same process | One runtime per session; call `NodusRuntime.clear_shared_state()` between test runs |
 | TYPES-001 | Type annotations are unenforced | Don't rely on them for correctness; document intent in comments only |
-| EXACT-001 | @exactly_once is per-VM in-memory only | Sufficient for single-session idempotency; not a distributed dedup guarantee |
+| EXACT-001 | @exactly_once is per-VM in-memory only **unless the host injects a persistent EffectStore** | **Resolved 2026-09-21:** `ResearchRuntime` injects `nodus_retry.SqliteEffectStore` (`<workspace>/.effects.sqlite3`) via `NodusRuntime.set_effect_store()`; verified across OS processes and through a crash-mid-effect (pending row → re-executes). Two caveats found: the #328 child resume VM does not inherit the injected store (our runner-direct resume path avoids it), and rehydrated step results come back key-sorted, so `json.stringify(step_result)` is not stable across a restart — `_ext_synthesize` canonicalises the analysis JSON so the draft (part of the key) is byte-stable across processes. |
 
 ---
 

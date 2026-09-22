@@ -53,6 +53,9 @@ It supports:
   source and the host re-supplying tools
 - **effect-gated approval** — tools are gated by the *effects* their manifests
   declare (`fs.write`, `network.write`), not by name
+- **exactly-once publish** — the file write and notification are wrapped in an
+  `@exactly_once` function backed by a durable SQLite effect store, so a retry
+  after a crash or a replay of an identical draft never fires them twice
 - **a real data plane** — every tool touches the real world:
   `web_search` (Tavily → Brave → keyless Wikipedia), `fetch_doc` (HTTP +
   HTML→text), `run_code` (hardened Docker sandbox), `synthesize` (Claude via
@@ -146,17 +149,17 @@ continues. `.env` is gitignored — load it into your shell however you prefer.
 .\venv\Scripts\nodus check workflows\research_task.nd
 .\venv\Scripts\nodus check --staged workflows\research_task.nd
 
-# Nodus suite (11 tests)
+# Nodus suite (12 tests)
 $env:NODUS_WORKFLOW_STORE_BACKEND='sqlite'
 .\venv\Scripts\nodus test tests\
 
-# Python suites (68 tests; hermetic — no network, no Docker, no API key needed)
+# Python suites (71 tests; hermetic — no network, no Docker, no API key needed)
 $env:PYTHONPATH='.'
 .\venv\Scripts\python -m pytest tests\ -q
 ```
 
-As of 2026-09-20, on `nodus-lang 5.14.0`, the repo passes: workflow check,
-staged-6.0 check, `11/11` Nodus tests, `68/68` Python tests.
+As of 2026-09-21, on `nodus-lang 5.14.0`, the repo passes: workflow check,
+staged-6.0 check, `12/12` Nodus tests, `71/71` Python tests.
 
 To drive the agent by hand:
 
@@ -184,6 +187,9 @@ The point of the repo. Notable so far:
 - **Store migration and the stranded-runs warning disagree** — one age-filters,
   the other doesn't, so old JSON runs can never be migrated and the warning
   becomes a hard error at 6.0.
+- **Rehydrated step results are key-sorted** and `json.stringify` has no canonical
+  mode, so strings derived from a prior step differ after a restart — found when
+  an exactly-once key built from the draft re-fired on a replay.
 - `ApprovalPolicy.require_for_effects` — effect-based gating, PR-ready.
 
 All of these, with file:line evidence and repros, are in
@@ -191,7 +197,8 @@ All of these, with file:line evidence and repros, are in
 development (map vs record access, closure shadowing, float-by-default
 numbers, single-line expressions, the v5 resume and `tool.call` fail-soft
 semantics) are distilled into one page in `CLAUDE.md`. Earlier evaluation
-findings — `@retry` being a no-op, `@exactly_once` being per-VM only, type
+findings — `@retry` being a no-op, `@exactly_once` being per-VM only unless a
+store is injected (now done), type
 annotations unenforced — are recorded in `docs/plan.md`.
 
 ## What Success Looks Like
