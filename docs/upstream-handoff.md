@@ -248,4 +248,4 @@ before it is embedded in anything identity-bearing.
 pip install nodus-lang==4.0.8 nodus-extension==0.1.0 nodus-mcp==0.1.0
 ```
 and revert commit `b19cab1` (this repo). The 4.x code paths are documented in the
-`2026-07-04` blocks of `Session Handoff Summary.md`.
+update log in `Session Handoff Summary.md`.

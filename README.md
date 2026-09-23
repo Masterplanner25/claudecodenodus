@@ -119,7 +119,8 @@ rehydrating process must re-supply them, and `ResearchRuntime.__init__` does.
 - `.nodus/learnings.md` — running log of Nodus behaviour pinned down during
   development (the rest of `.nodus/` is runtime state and is ignored)
 - `CLAUDE.md` — repo-local Nodus rules for Claude Code (the traps, in one page)
-- `Session Handoff Summary.md` — dated status, most recent block first
+- `Session Handoff Summary.md` — current status, constraints not to regress,
+  and a dated update log
 
 ## Local Setup
 
