@@ -167,7 +167,24 @@ The `content_hash` for source nodes is also the memory address for retrieval.
 > file write + notification, keyed on its full inputs, and the host injects a durable
 > `nodus_retry.SqliteEffectStore` (see EXACT-001 below).
 
-Cross-session recall: `search_by_tags(["topic:llm-safety"])` returns relevant nodes across all sessions.
+Cross-session recall: `search_by_tags(["topic:llm", "topic:safety"], require=["status:final"])` returns
+relevant nodes across all sessions.
+
+> **Built 2026-09-22** (`src/memory.py`). `SqliteMemoryStore` is a drop-in Nodus `MemoryStore`
+> (injected via `NodusRuntime(memory_store=...)`) that persists to `<workspace>/.memory.sqlite3`
+> and mirrors tags into a searchable index. Tagging rides on stdlib `mem.tag(key, tags)` — it writes
+> `__nodus_tags__:<key>`, which the store recognises — so no new builtin was needed.
+>
+> `topic:` tags are derived host-side by `topic_tags(question)`: lowercase, drop stopwords and
+> words under three characters, cap at 8. Deterministic, so tests stay hermetic and two phrasings
+> of the same subject overlap ("What is LLM safety?" and "Recent advances in LLM safety evaluation"
+> share `topic:llm`, `topic:safety`). An LLM-extracted canonical topic is a drop-in replacement for
+> that one function.
+>
+> The DAG gained a `recall` step between `init` and `analyze`: it asks for prior sessions' nodes
+> matching **any** topic tag but **requiring** `status:final`, excluding the current session, and
+> feeds them to `synthesize` as prior context. `require` matters — without it a recall returns the
+> session's own meta node and half-written draft as "prior research".
 
 ---
 

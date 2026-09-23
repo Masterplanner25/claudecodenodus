@@ -56,6 +56,9 @@ It supports:
 - **exactly-once publish** — the file write and notification are wrapped in an
   `@exactly_once` function backed by a durable SQLite effect store, so a retry
   after a crash or a replay of an identical draft never fires them twice
+- **cross-session memory** — findings are tagged (`session:`/`topic:`/`domain:`/
+  `status:`) in a durable, tag-indexed store; a later session on a related
+  question recalls earlier *published* findings and drafts with them in view
 - **a real data plane** — every tool touches the real world:
   `web_search` (Tavily → Brave → keyless Wikipedia), `fetch_doc` (HTTP +
   HTML→text), `run_code` (hardened Docker sandbox), `synthesize` (Claude via
@@ -100,6 +103,8 @@ rehydrating process must re-supply them, and `ResearchRuntime.__init__` does.
     registration, start / resume / two-phase reject, cross-process resume
   - `web.py`, `sandbox.py`, `notify.py` — real tool implementations
     (each with an offline / disabled variant for hermetic tests)
+  - `memory.py` — `SqliteMemoryStore`: durable Nodus `MemoryStore` + tag index,
+    cross-session recall, and the deterministic `topic_tags()` heuristic
   - `approval_store.py` — durable `FileApprovalStore`
   - `policy.py` — `require_for_effects()` (candidate for upstreaming)
   - `approval_api.py` — `ApprovalService` + stdlib `http.server` adapter
@@ -108,7 +113,8 @@ rehydrating process must re-supply them, and `ResearchRuntime.__init__` does.
 - `tests/` — Python integration suites (`pytest`) and the Nodus suite
   (`research_task_test.nd`, which carries its own inline copy of the workflow)
 - `probes/` — small `.nd` / `.py` scripts that pin down runtime behaviour;
-  `repro_v5_child_vm_tool_registry.py` is an upstream bug repro
+  `repro_v5_child_vm_tool_registry.py` is an upstream bug repro and
+  `probe_xsession_recall.py` drives cross-session recall across two real processes
 - `docs/plan.md` — design; `docs/upstream-handoff.md` — findings to report
 - `.nodus/learnings.md` — running log of Nodus behaviour pinned down during
   development (the rest of `.nodus/` is runtime state and is ignored)
@@ -149,17 +155,17 @@ continues. `.env` is gitignored — load it into your shell however you prefer.
 .\venv\Scripts\nodus check workflows\research_task.nd
 .\venv\Scripts\nodus check --staged workflows\research_task.nd
 
-# Nodus suite (12 tests)
+# Nodus suite (15 tests)
 $env:NODUS_WORKFLOW_STORE_BACKEND='sqlite'
 .\venv\Scripts\nodus test tests\
 
-# Python suites (71 tests; hermetic — no network, no Docker, no API key needed)
+# Python suites (88 tests; hermetic — no network, no Docker, no API key needed)
 $env:PYTHONPATH='.'
 .\venv\Scripts\python -m pytest tests\ -q
 ```
 
-As of 2026-09-21, on `nodus-lang 5.14.0`, the repo passes: workflow check,
-staged-6.0 check, `12/12` Nodus tests, `71/71` Python tests.
+As of 2026-09-22, on `nodus-lang 5.14.0`, the repo passes: workflow check,
+staged-6.0 check, `15/15` Nodus tests, `88/88` Python tests.
 
 To drive the agent by hand:
 

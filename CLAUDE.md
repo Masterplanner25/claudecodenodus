@@ -52,8 +52,19 @@ nodus repl                               # interactive REPL
   Override: `nodus run --time-limit N script.nd` — **N is seconds** in v5.
 - v5.10+: `spawn()` also accepts a zero-arg `fn() { ... }` directly (coroutine form still works).
 
+**Lists, strings, memory**
+- No `concat()` — concatenate lists with `+`: `a + b`.
+- `contains()` is in `std:strings`, not a builtin: `strings.contains(haystack, needle)`.
+- `std:test` has `assert`, `assert_eq`, `assert_neq`, `assert_contains`, `assert_has_key`,
+  `assert_throws`, `assert_err/ok/kind`, `assert_close`, `assert_in_range` — there is no `assert_true`.
+- `mem.tag(key, tags)` is just `mem.put("__nodus_tags__:<key>", tags)`; there is no tag search in
+  stdlib. This project's host store (`src/memory.py`) indexes those keys and exposes search.
+- The default `std:memory` store is a **process-global singleton** shared by every `NodusRuntime`
+  (VM-001) and is in-memory. Inject one per host: `NodusRuntime(memory_store=...)`.
+
 **Workflows**
 - Workflow results are maps. Always bracket notation: `r["steps"]["step_name"]`.
+- A step can only reference steps it declares in `after` — a transitive dependency is not in scope.
 - `checkpoint` is valid inside step bodies only, not at workflow body level.
 - Step results must be JSON-serializable — return maps `{"k": v}`, not records `{k: v}`.
 - `retry_delay_ms > 0` makes retries async. For synchronous retry, use `try/catch` inside the step body.

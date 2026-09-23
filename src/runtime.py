@@ -26,6 +26,7 @@ from nodus_llm import CredentialProfile, CredentialStore, FailoverClient
 from nodus_retry import SqliteEffectStore
 
 from src.approval_store import FileApprovalStore
+from src.memory import SqliteMemoryStore, topic_tags
 from src.policy import require_for_effects
 from src.web import HttpWebBackend, OfflineWebBackend, build_web_backend
 from src.sandbox import DockerCodeRunner, build_code_runner
@@ -58,7 +59,7 @@ _SYNTHESIZE_MANIFEST = {
     "name": "research.synthesize",
     "description": "Synthesize a research draft from gathered findings using an LLM.",
     "effects": ["llm.complete"],
-    "schema": {"question": "string", "analysis": "string", "feedback": "string"},
+    "schema": {"question": "string", "analysis": "string", "feedback": "string", "prior": "string"},
 }
 
 
@@ -133,7 +134,7 @@ class ResearchRuntime:
         # or: result2 = rt.resume_with_feedback(run_id, "needs more detail")
     """
 
-    def __init__(self, *, workspace: str | None = None, policy=None, store=None, effect_store=None, llm_client=_AUTO_LLM, web_backend=_AUTO_WEB, code_runner=_AUTO_CODE, notifier=_AUTO_NOTIFY) -> None:
+    def __init__(self, *, workspace: str | None = None, policy=None, store=None, effect_store=None, memory_store=None, llm_client=_AUTO_LLM, web_backend=_AUTO_WEB, code_runner=_AUTO_CODE, notifier=_AUTO_NOTIFY) -> None:
         self.workspace = Path(workspace) if workspace else Path.cwd() / "workspace"
         self.workspace.mkdir(parents=True, exist_ok=True)
         (self.workspace / "output").mkdir(exist_ok=True)
@@ -151,6 +152,12 @@ class ResearchRuntime:
         # approval store: an effect recorded here is visible to every process
         # that resumes this workspace.  ``:memory:`` or InMemoryEffectStore for tests.
         self._effect_store = effect_store if effect_store is not None else SqliteEffectStore(str(self.workspace / ".effects.sqlite3"))
+        # Durable, tag-indexed memory.  Two reasons not to take the default:
+        # ``std:memory``'s default store is a *process-global* singleton shared by
+        # every NodusRuntime (VM-001), and it is in-memory, so nothing a session
+        # learns outlives it.  This one is per-workspace and persists, which is
+        # what makes cross-session recall mean anything.
+        self._memory_store = memory_store if memory_store is not None else SqliteMemoryStore(self.workspace / ".memory.sqlite3")
         self._llm_client = build_llm_client() if llm_client == _AUTO_LLM else llm_client
         # Real HTTP backend by default; tests/offline mode inject OfflineWebBackend.
         self._web_backend = build_web_backend() if web_backend == _AUTO_WEB else web_backend
@@ -165,6 +172,7 @@ class ResearchRuntime:
             timeout_ms=None,
             allow_network=True,
             allow_subprocess=False,
+            memory_store=self._memory_store,
         )
         # Must precede the first run_source: the store is attached to each VM
         # the runtime builds (start AND the primed cross-process resume VM).
@@ -221,6 +229,7 @@ class ResearchRuntime:
                 web_backend=self._web_backend,
                 code_runner=self._code_runner,
                 notifier=self._notifier,
+                memory_store=self._memory_store,
             )
 
         return handler
@@ -250,6 +259,10 @@ class ResearchRuntime:
             "_init_session_id": session_id,
             "_init_notify_channel": os.environ.get("RESEARCH_NOTIFY_CHANNEL", "console"),
             "_init_notify_target": os.environ.get("RESEARCH_NOTIFY_TARGET", "researcher"),
+            # Topic tags are derived host-side so they are identical on the
+            # original run and on any rehydrated resume (the workflow tags and
+            # recalls with them, so drift would split a topic in two).
+            "_init_topic_tags": topic_tags(question),
         }
 
     def start(self, question: str, session_id: str) -> dict:
@@ -384,9 +397,10 @@ class ResearchRuntime:
             self._web_backend.close()
         if self._notifier is not None:
             self._notifier.close()
-        close = getattr(self._effect_store, "close", None)
-        if close is not None:
-            close()
+        for closeable in (self._effect_store, self._memory_store):
+            close = getattr(closeable, "close", None)
+            if close is not None:
+                close()
         self._runtime.shutdown()
         NodusRuntime.clear_shared_state()
 
@@ -397,7 +411,7 @@ class ResearchRuntime:
 # web_search / fetch_doc are real (src/web.py), run_code is Docker-sandboxed
 # (src/sandbox.py), and notify does real delivery (src/notify.py).
 
-def _dispatch(name: str, args: dict, *, workspace: Path, llm_client=None, web_backend=None, code_runner=None, notifier=None) -> dict:
+def _dispatch(name: str, args: dict, *, workspace: Path, llm_client=None, web_backend=None, code_runner=None, notifier=None, memory_store=None) -> dict:
     if name == "research.web_search":
         return _ext_web_search(args, web_backend=web_backend)
     if name == "research.fetch_doc":
@@ -410,6 +424,8 @@ def _dispatch(name: str, args: dict, *, workspace: Path, llm_client=None, web_ba
         return _ext_write_file(args, workspace=workspace)
     if name == "research.notify":
         return _ext_notify(args, notifier=notifier)
+    if name == "research.memory_recall":
+        return _ext_memory_recall(args, memory_store=memory_store)
     raise ValueError(f"Unknown extension: {name}")
 
 
@@ -501,26 +517,37 @@ def _ext_synthesize(args: dict, *, llm_client=None) -> dict:
     question = args.get("question", "")
     analysis = _canonical_json(args.get("analysis", ""))
     feedback = args.get("feedback", "") or ""
+    # Recalled work from earlier sessions on the same topic.  Canonicalised
+    # for the same reason as the analysis: the draft is an idempotency key.
+    prior = _canonical_json(args.get("prior", "") or "")
+    prior_block = f"Prior research on this topic:\n{prior}\n\n" if prior and prior not in ("[]", '""') else ""
 
     if llm_client is None:
         if feedback:
             body = (
                 f"Revised draft on: {question}\n\n"
                 f"Addressing feedback: {feedback}\n\n"
+                f"{prior_block}"
                 f"Findings considered:\n{analysis}"
             )
         else:
-            body = f"Initial draft on: {question}\n\nFindings considered:\n{analysis}"
+            body = f"Initial draft on: {question}\n\n{prior_block}Findings considered:\n{analysis}"
         return {"draft": body}
 
+    recalled = (
+        f"Findings from earlier research sessions on this topic (JSON):\n{prior}\n"
+        "Treat these as background: reuse what still holds, and say so if the new findings"
+        " contradict them.\n\n"
+        if prior_block else ""
+    )
     if feedback:
         user = (
-            f"Question: {question}\n\nFindings (JSON):\n{analysis}\n\n"
+            f"Question: {question}\n\n{recalled}Findings (JSON):\n{analysis}\n\n"
             f"Revise the research brief to address this reviewer feedback: {feedback}"
         )
     else:
         user = (
-            f"Question: {question}\n\nFindings (JSON):\n{analysis}\n\n"
+            f"Question: {question}\n\n{recalled}Findings (JSON):\n{analysis}\n\n"
             "Write the initial research brief answering the question from these findings."
         )
     text = llm_client.chat(
@@ -537,6 +564,28 @@ def _ext_write_file(args: dict, *, workspace: Path) -> dict:
     full_path.parent.mkdir(parents=True, exist_ok=True)
     full_path.write_text(content, encoding="utf-8")
     return {"written_bytes": len(content.encode()), "path": str(full_path)}
+
+
+def _ext_memory_recall(args: dict, *, memory_store=None) -> dict:
+    """Recall prior sessions' nodes by tag.  Fails open: no memory, no recall.
+
+    ``exclude_session`` keeps a run from recalling itself — the current
+    session's own nodes are already in its state.
+    """
+    if memory_store is None or not hasattr(memory_store, "recall_by_tags"):
+        return {"results": [], "count": 0, "error": "memory_recall_unavailable"}
+    tags = args.get("tags") or []
+    exclude = args.get("exclude_session") or None
+    limit = int(args.get("limit", 5) or 5)
+    match = args.get("match") or "any"
+    require = args.get("require") or None
+    try:
+        results = memory_store.recall_by_tags(
+            tags, match=match, require=require, exclude_session=exclude, limit=limit,
+        )
+    except Exception as exc:  # a recall must never be able to fail a research run
+        return {"results": [], "count": 0, "error": str(exc)}
+    return {"results": results, "count": len(results)}
 
 
 def _ext_notify(args: dict, *, notifier=None) -> dict:

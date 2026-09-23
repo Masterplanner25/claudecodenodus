@@ -46,37 +46,79 @@ fn publish_once(session_id, draft, question, channel, target) {
     return {"written": json.parse(json.stringify(wr)), "notified": json.parse(json.stringify(nr))}
 }
 
+// ── memory: tagging + cross-session recall ─────────────────────────────────
+// Memory nodes are path-addressed per session and tagged for retrieval across
+// sessions.  `mem.tag` is stdlib (it writes `__nodus_tags__:<key>`); the host's
+// SqliteMemoryStore mirrors those tags into a searchable index, so tagging here
+// is all that is needed for `research.memory_recall` to find the node later.
+fn remember(key, value, tags) {
+    mem.put(key, value)
+    mem.tag(key, tags)
+    return key
+}
+
+// Store one gather domain's fetched document under its content hash, tagged by
+// domain -- the plan's `research/{session}/sources/{content_hash}` node.
+fn remember_source(session_id, domain, gathered, topic_tags) {
+    let doc = gathered["top_doc"]
+    if (doc == nil) {
+        return nil
+    }
+    let tags = topic_tags + (["session:\(session_id)", "domain:\(domain)", "status:raw"])
+    return remember("research/\(session_id)/sources/\(doc["content_hash"])", doc, tags)
+}
+
 workflow research_task {
     state question = _init_question
     state session_id = _init_session_id
     state notify_channel = _init_notify_channel
     state notify_target = _init_notify_target
     state draft = nil
+    state topic_tags = _init_topic_tags
 
     step init {
-        mem.put("research/\(session_id)/meta", {"question": question})
+        remember("research/\(session_id)/meta", {"question": question}, topic_tags + (["session:\(session_id)", "status:raw"]))
         return session_id
     }
 
+    // What do we already know? Prior sessions' *published* findings on any of
+    // this question's topics, most tag overlap first, excluding this session.
+    // `require: status:final` is what keeps a half-finished draft or a bare meta
+    // node from coming back as "prior research".  Fails open: an empty recall is
+    // a first-time question, not an error.
+    step recall after init {
+        let r = tool.call("research.memory_recall", {"tags": topic_tags, "match": "any", "require": ["status:final"], "exclude_session": session_id, "limit": 3i})
+        if (type(r) == "error") {
+            return {"results": [], "count": 0i}
+        }
+        return json.parse(json.stringify(r))
+    }
+
     step gather_web after init {
-        return gather_sources(question, 5i)
+        let g = gather_sources(question, 5i)
+        remember_source(session_id, "web", g, topic_tags)
+        return g
     }
 
     step gather_code after init {
         let q = "\(question) code examples"
-        return gather_sources(q, 3i)
+        let g = gather_sources(q, 3i)
+        remember_source(session_id, "code", g, topic_tags)
+        return g
     }
 
     step gather_data after init {
         let q = "\(question) research data"
-        return gather_sources(q, 3i)
+        let g = gather_sources(q, 3i)
+        remember_source(session_id, "data", g, topic_tags)
+        return g
     }
 
-    step analyze after gather_web, gather_code, gather_data {
+    step analyze after gather_web, gather_code, gather_data, recall {
         return {"web": gather_web, "code": gather_code, "data": gather_data}
     }
 
-    step draft_step after analyze {
+    step draft_step after analyze, recall {
         checkpoint "before_draft"
         let p = workflow_resume_payload()
         let fb = ""
@@ -84,10 +126,12 @@ workflow research_task {
             fb = p["feedback"]
         }
         let analysis_json = json.stringify(analyze)
-        let r = json.parse(json.stringify(tool.call("research.synthesize", {"question": question, "analysis": analysis_json, "feedback": fb})))
+        // Prior sessions' findings go in as background alongside this run's own.
+        let prior_json = json.stringify(recall["results"])
+        let r = json.parse(json.stringify(tool.call("research.synthesize", {"question": question, "analysis": analysis_json, "feedback": fb, "prior": prior_json})))
         let new_draft = r["draft"]
         draft = new_draft
-        mem.put("research/\(session_id)/draft", new_draft)
+        remember("research/\(session_id)/draft", new_draft, topic_tags + (["session:\(session_id)", "status:draft"]))
         return new_draft
     }
 
@@ -111,7 +155,8 @@ workflow research_task {
             return {"published": false, "session_id": session_id, "revision_requested": true}
         }
         let effects = publish_once(session_id, draft, question, notify_channel, notify_target)
-        mem.put("research/\(session_id)/final", draft)
+        // status:final is what a later session's recall looks for.
+        remember("research/\(session_id)/final", draft, topic_tags + (["session:\(session_id)", "status:final"]))
         return {"published": true, "session_id": session_id, "effects": effects}
     }
 }

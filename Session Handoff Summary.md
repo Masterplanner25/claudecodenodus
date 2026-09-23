@@ -1,7 +1,37 @@
 # Session Handoff Summary
 
 Repo: `C:\dev\claudecodenodus` — Nodus-based autonomous research agent.
-Date: 2026-06-21 (updated 2026-09-21). Nodus: `nodus-lang 5.14.0`.
+Date: 2026-06-21 (updated 2026-09-22). Nodus: `nodus-lang 5.14.0`.
+
+> **2026-09-22 — `src/memory.py` BUILT: durable, tag-indexed memory + cross-session recall.**
+> Suites: **Python 88/88 (+17), Nodus 15/15 (+3), check + staged OK.** This was the last
+> open item from the original plan.
+> - **`src/memory.py`** — `SqliteMemoryStore`, a drop-in Nodus `MemoryStore` subclass
+>   persisting to `<workspace>/.memory.sqlite3` with a tag index. Subclass, not a fresh
+>   class, because `memory_runtime.recall_from/recall_all` read `store._values` directly;
+>   the dict stays authoritative and SQLite is a write-through mirror, reloaded on open.
+>   Injected via `NodusRuntime(memory_store=...)`; `ResearchRuntime(memory_store=)` for tests.
+> - **Tagging rides on stdlib.** `mem.tag(k, tags)` is just `put("__nodus_tags__:<k>", tags)`;
+>   the store recognises that prefix and indexes it, so no new builtin/tool was needed to tag.
+> - **`topic_tags(question)`** — deterministic keywords (lowercase, drop stopwords and <3-char
+>   words, cap 8), injected as `_init_topic_tags` so a rehydrated resume derives identical tags.
+>   An LLM-extracted canonical topic is a drop-in replacement for that one function.
+> - **DAG:** new `recall` step between `init` and `analyze` (`draft_step after analyze, recall`);
+>   `init`/gathers/`draft_step`/`publish` now tag their nodes per the plan's schema, and gathers
+>   store their fetched doc at `research/{session}/sources/{content_hash}` with `domain:` tags.
+>   New tool `research.memory_recall` (manifest `extensions/memory_recall/`, effect `memory.read`,
+>   ungated); `_ext_synthesize` takes `prior` and puts it in the prompt / offline draft.
+> - **`require` matters:** recall asks for *any* topic-tag overlap but *requires* `status:final`.
+>   Without it a session recalls its own meta node and half-written draft as "prior research" —
+>   caught in the two-process probe, not by a unit test.
+> - **Live-verified across two real OS processes:** `probes/probe_xsession_recall.py <ws> a|b` —
+>   A publishes, B (separate PID, related question) recalls exactly `research/sess-a/final` and
+>   carries it into its draft.
+> - Nodus gotchas hit: no `concat()` (use `+`), `contains()` lives in `std:strings`, `std:test`
+>   has no `assert_true`, and **a step only sees steps named in its own `after`** (a transitive
+>   dependency is not in scope). All in `CLAUDE.md` / `.nodus/learnings.md`.
+> - Tests: `tests/test_memory.py` (17) + 3 Nodus cases (recall scoping, prior findings reaching
+>   the draft, tag schema).
 
 > **2026-09-21 — EXACT-001 RESOLVED: `@exactly_once` is durable across processes.**
 > Suites: **Python 71/71 (+3), Nodus 12/12 (+1), check + staged OK.**
@@ -187,7 +217,7 @@ docs/plan.md      ← design doc (open-items updated)
    synthesis runs online against a live model. No mock tools remain.
 2. **LLM runs offline by default** — real synthesis only with `ANTHROPIC_API_KEY`
    set; otherwise a deterministic string. Never run against a live model here.
-3. **`src/memory.py`** — listed in plan, not created (memory is inline via
+3. ~~**`src/memory.py`**~~ BUILT 2026-09-22 (see top). Was: listed in plan, not created (memory is inline via
    `std:memory`; tag-based cross-session recall not wired).
 4. ~~**`@exactly_once` is per-VM only** (EXACT-001)~~ RESOLVED 2026-09-21 (see top). Was: idempotency doesn't survive
    restart; fine for single-session.
@@ -203,9 +233,10 @@ handler signatures) are fixed, so real implementations are drop-in.
 `fetch_doc`~~ ✅ (live). ~~`run_code` Docker sandbox~~ ✅ (live-verified). ~~wire
 `fetch_doc` into the DAG~~ ✅. ~~flip the LLM online~~ ✅ (live via
 `claude-opus-4-8`). ~~make `research.notify` real~~ ✅ (multi-channel, live-verified
-end-to-end). No mock tools remain. **Residual non-tool gaps (optional):** ~~EXACT-001~~ (resolved
-2026-09-21, durable `SqliteEffectStore`) and the unbuilt tag-based
-cross-session recall (`src/memory.py`; memory is inline via `std:memory`).
+end-to-end). No mock tools remain. **Residual non-tool gaps:** ~~EXACT-001~~ (resolved
+2026-09-21, durable `SqliteEffectStore`) and ~~the unbuilt tag-based
+cross-session recall (`src/memory.py`)~~ (built 2026-09-22). **Every original
+plan item is now implemented;** what remains is upstream reporting.
 
 Follow-up worth upstreaming: `ApprovalPolicy.require_for_effects` as a real
 classmethod in `nodus_approvals` (currently in-repo at `src/policy.py`).

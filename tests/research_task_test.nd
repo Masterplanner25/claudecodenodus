@@ -2,17 +2,24 @@ import "std:test" as t
 import "std:tool" as tool
 import "std:memory" as mem
 import "std:json" as json
+import "std:strings" as strings
 
 // ── stub tool registrations ────────────────────────────────────────────────
 
 tool.register({name: "research.web_search", description: "stub", handler: fn(args) { return {"results": [{"url": "https://example.com", "title": "Result", "snippet": "..."}]} }, schema: {"query": "string", "max_results": "int"}})
 tool.register({name: "research.fetch_doc", description: "stub", handler: fn(args) { return {"text": "stub content", "title": "Stub", "fetched_at": "2026-06-21", "content_hash": "abc123"} }, schema: {"url": "string", "max_chars": "int"}})
 tool.register({name: "research.run_code", description: "stub", handler: fn(args) { return {"stdout": "ok", "stderr": "", "exit_code": 0} }, schema: {"code": "string", "timeout_seconds": "int"}})
-tool.register({name: "research.synthesize", description: "stub", handler: fn(args) { return {"draft": "draft for \(args["question"]) fb=\(args["feedback"])"} }, schema: {"question": "string", "analysis": "string", "feedback": "string"}})
+tool.register({name: "research.synthesize", description: "stub", handler: fn(args) { return {"draft": "draft for \(args["question"]) fb=\(args["feedback"]) prior=\(args["prior"])"} }, schema: {"question": "string", "analysis": "string", "feedback": "string", "prior": "string"}})
 // side-effect counters: publish_once must fire these exactly once per distinct publish
 let _effects = {"writes": 0i, "notifies": 0i}
 tool.register({name: "research.write_file", description: "stub", handler: fn(args) { _effects["writes"] = _effects["writes"] + 1i
     return {"written_bytes": 100i, "path": args["path"]} }, schema: {"path": "string", "content": "string", "format": "string"}})
+let _recall = {"calls": 0i, "last_tags": [], "last_exclude": "", "last_require": [], "results": []}
+tool.register({name: "research.memory_recall", description: "stub", handler: fn(args) { _recall["calls"] = _recall["calls"] + 1i
+    _recall["last_tags"] = args["tags"]
+    _recall["last_exclude"] = args["exclude_session"]
+    _recall["last_require"] = args["require"]
+    return {"results": _recall["results"], "count": len(_recall["results"])} }, schema: {"tags": "list", "match": "string", "require": "list", "exclude_session": "string", "limit": "int"}})
 tool.register({name: "research.notify", description: "stub", handler: fn(args) { _effects["notifies"] = _effects["notifies"] + 1i
     return {"delivered": true, "response": "ok"} }, schema: {"channel": "string", "target": "string", "message": "string", "run_id": "string"}})
 
@@ -22,6 +29,9 @@ let _init_question = "What is LLM safety?"
 let _init_session_id = "test-sess-001"
 let _init_notify_channel = "console"
 let _init_notify_target = "researcher"
+// Host-derived in production (src/memory.py::topic_tags); fixed here so the
+// suite stays deterministic.
+let _init_topic_tags = ["topic:llm", "topic:safety"]
 
 // ── gather helpers (mirror workflows/research_task.nd) ─────────────────────
 
@@ -65,37 +75,79 @@ fn publish_once(session_id, draft, question, channel, target) {
     return {"written": json.parse(json.stringify(wr)), "notified": json.parse(json.stringify(nr))}
 }
 
+// ── memory: tagging + cross-session recall ─────────────────────────────────
+// Memory nodes are path-addressed per session and tagged for retrieval across
+// sessions.  `mem.tag` is stdlib (it writes `__nodus_tags__:<key>`); the host's
+// SqliteMemoryStore mirrors those tags into a searchable index, so tagging here
+// is all that is needed for `research.memory_recall` to find the node later.
+fn remember(key, value, tags) {
+    mem.put(key, value)
+    mem.tag(key, tags)
+    return key
+}
+
+// Store one gather domain's fetched document under its content hash, tagged by
+// domain -- the plan's `research/{session}/sources/{content_hash}` node.
+fn remember_source(session_id, domain, gathered, topic_tags) {
+    let doc = gathered["top_doc"]
+    if (doc == nil) {
+        return nil
+    }
+    let tags = topic_tags + (["session:\(session_id)", "domain:\(domain)", "status:raw"])
+    return remember("research/\(session_id)/sources/\(doc["content_hash"])", doc, tags)
+}
+
 workflow research_task {
     state question = _init_question
     state session_id = _init_session_id
     state notify_channel = _init_notify_channel
     state notify_target = _init_notify_target
     state draft = nil
+    state topic_tags = _init_topic_tags
 
     step init {
-        mem.put("research/\(session_id)/meta", {"question": question})
+        remember("research/\(session_id)/meta", {"question": question}, topic_tags + (["session:\(session_id)", "status:raw"]))
         return session_id
     }
 
+    // What do we already know? Prior sessions' *published* findings on any of
+    // this question's topics, most tag overlap first, excluding this session.
+    // `require: status:final` is what keeps a half-finished draft or a bare meta
+    // node from coming back as "prior research".  Fails open: an empty recall is
+    // a first-time question, not an error.
+    step recall after init {
+        let r = tool.call("research.memory_recall", {"tags": topic_tags, "match": "any", "require": ["status:final"], "exclude_session": session_id, "limit": 3i})
+        if (type(r) == "error") {
+            return {"results": [], "count": 0i}
+        }
+        return json.parse(json.stringify(r))
+    }
+
     step gather_web after init {
-        return gather_sources(question, 5i)
+        let g = gather_sources(question, 5i)
+        remember_source(session_id, "web", g, topic_tags)
+        return g
     }
 
     step gather_code after init {
         let q = "\(question) code examples"
-        return gather_sources(q, 3i)
+        let g = gather_sources(q, 3i)
+        remember_source(session_id, "code", g, topic_tags)
+        return g
     }
 
     step gather_data after init {
         let q = "\(question) research data"
-        return gather_sources(q, 3i)
+        let g = gather_sources(q, 3i)
+        remember_source(session_id, "data", g, topic_tags)
+        return g
     }
 
-    step analyze after gather_web, gather_code, gather_data {
+    step analyze after gather_web, gather_code, gather_data, recall {
         return {"web": gather_web, "code": gather_code, "data": gather_data}
     }
 
-    step draft_step after analyze {
+    step draft_step after analyze, recall {
         checkpoint "before_draft"
         let p = workflow_resume_payload()
         let fb = ""
@@ -103,10 +155,12 @@ workflow research_task {
             fb = p["feedback"]
         }
         let analysis_json = json.stringify(analyze)
-        let r = json.parse(json.stringify(tool.call("research.synthesize", {"question": question, "analysis": analysis_json, "feedback": fb})))
+        // Prior sessions' findings go in as background alongside this run's own.
+        let prior_json = json.stringify(recall["results"])
+        let r = json.parse(json.stringify(tool.call("research.synthesize", {"question": question, "analysis": analysis_json, "feedback": fb, "prior": prior_json})))
         let new_draft = r["draft"]
         draft = new_draft
-        mem.put("research/\(session_id)/draft", new_draft)
+        remember("research/\(session_id)/draft", new_draft, topic_tags + (["session:\(session_id)", "status:draft"]))
         return new_draft
     }
 
@@ -130,7 +184,8 @@ workflow research_task {
             return {"published": false, "session_id": session_id, "revision_requested": true}
         }
         let effects = publish_once(session_id, draft, question, notify_channel, notify_target)
-        mem.put("research/\(session_id)/final", draft)
+        // status:final is what a later session's recall looks for.
+        remember("research/\(session_id)/final", draft, topic_tags + (["session:\(session_id)", "status:final"]))
         return {"published": true, "session_id": session_id, "effects": effects}
     }
 }
@@ -205,6 +260,40 @@ t.suite("research_task workflow", fn() {
         let r2 = resume_workflow(gid, "before_draft", {"feedback": "revise this"})
         t.assert_eq(r2["ok"], false, nil)
         t.assert_eq(r2["category"], "waiting_run_checkpoint_resume", nil)
+    })
+
+    t.case("recall runs before the draft and is scoped to other sessions", fn() {
+        _recall["results"] = []
+        let before = _recall["calls"]
+        let r = run_workflow(research_task)
+        t.assert_eq(_recall["calls"], before + 1i, nil)
+        t.assert_eq(_recall["last_exclude"], "test-sess-001", nil)
+        t.assert_eq(_recall["last_tags"], ["topic:llm", "topic:safety"], nil)
+        t.assert_eq(_recall["last_require"], ["status:final"], nil)
+        t.assert_eq(r["steps"]["recall"]["count"], 0i, nil)
+    })
+
+    t.case("recalled prior findings reach the draft", fn() {
+        _recall["results"] = [{"key": "research/old-sess/final", "session_id": "old-sess", "value": "what we learned before", "tags": ["topic:llm", "status:final"]}]
+        let r = run_workflow(research_task)
+        _recall["results"] = []
+        t.assert_eq(r["steps"]["recall"]["count"], 1i, nil)
+        t.assert(strings.contains(r["state"]["draft"], "what we learned before"), "prior findings must reach the draft")
+    })
+
+    t.case("memory nodes are tagged for cross-session recall", fn() {
+        let r = run_workflow(research_task)
+        let sid = r["state"]["session_id"]
+        // std:memory's tag() stores under __nodus_tags__:<key>; the host store
+        // mirrors those into its searchable index.
+        let meta_tags = mem.get("__nodus_tags__:research/\(sid)/meta")
+        t.assert(strings.contains(str(meta_tags), "topic:llm"), "meta carries topic tags")
+        t.assert(strings.contains(str(meta_tags), "session:\(sid)"), "meta carries its session tag")
+        let draft_tags = mem.get("__nodus_tags__:research/\(sid)/draft")
+        t.assert(strings.contains(str(draft_tags), "status:draft"), "draft is tagged status:draft")
+        let r2 = resume_workflow(r["graph_id"], {"approved": true})
+        let final_tags = mem.get("__nodus_tags__:research/\(sid)/final")
+        t.assert(strings.contains(str(final_tags), "status:final"), "published final is tagged status:final")
     })
 
     t.case("publish effects fire exactly once for an identical replayed draft", fn() {

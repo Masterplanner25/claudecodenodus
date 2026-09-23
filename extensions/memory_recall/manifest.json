@@ -1,0 +1,13 @@
+{
+  "name": "research.memory_recall",
+  "description": "Recall prior sessions' work from tag-indexed memory. Returns the best-matching nodes, most tag overlap first.",
+  "version": "1.0",
+  "sandbox_tier": "in_process",
+  "schema": { "tags": "list", "match": "string", "require": "list", "exclude_session": "string", "limit": "int" },
+  "returns_schema": {
+    "results": "list",
+    "count": "int"
+  },
+  "effects": ["memory.read"],
+  "provenance": { "trust_class": "trusted", "origin": "local" }
+}

@@ -71,3 +71,15 @@ In `src/runtime.py` the `research.synthesize` tool (effect `llm.complete`, ungat
 **Rehydrated step results are key-sorted.** The run store persists with `sort_keys=True`; live maps keep insertion order; `std:json.stringify` has no sort option. `json.stringify(prior_step_result)` therefore differs after a restart for identical content — canonicalise on the host before using it as an identity. (Bit us: an exactly-once publish keyed on the draft text re-fired on a rehydrated replay.)
 
 **Shared VM = shared effect store in `nodus test`.** All cases in one `*_test.nd` share the per-VM store, so an `@exactly_once` fn called with identical args in two cases is cached across them. Use case-unique inputs.
+
+## 2026-09-22 — memory, tags and cross-session recall
+
+**The default `std:memory` store is a process-global singleton** (`GLOBAL_MEMORY_STORE`, VM-001) **and in-memory.** `NodusRuntime(memory_store=...)` takes a replacement, and it is handed to every VM the runtime builds. Subclass `nodus.services.memory_runtime.MemoryStore` rather than writing a fresh class: `recall_from`/`recall_all` read `store._values` directly, so that dict has to stay authoritative — keep it as the live copy and mirror writes to disk.
+
+**`mem.tag(key, tags)` has no search behind it.** It is literally `memory_put("__nodus_tags__:\(key)", tags)`. A host store can recognise that prefix and build its own index, which means tagging from `.nd` needs no new builtin and no new tool.
+
+**No `concat()` for lists — use `+`.** `["a"] + ["b", "c"]` works. `contains()` is in `std:strings` (`strings.contains(s, sub)`), not a builtin. `std:test` has `assert(cond, msg)` but no `assert_true`.
+
+**A step only sees the steps it lists in `after`.** A transitive dependency is not in scope: `draft_step after analyze` could not read `recall` even though `analyze after ... recall`. Add the step to `after` explicitly.
+
+**Tag search needs an "any of these AND all of those" mode.** Matching any topic tag alone pulls back a session's own meta node and interim draft as "prior research". `search_by_tags(topics, require=["status:final"])` — overlap on any topic, but only among published nodes — is the useful query.
