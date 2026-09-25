@@ -280,7 +280,13 @@ All five tools run in the `container` sandbox tier (Docker, `--cap-drop ALL --ne
 ApprovalPolicy.require_for_effects(["network.write", "fs.write"])
 ```
 
-`require_for_effects()` does not yet exist in `nodus_approvals` — needs to be added alongside `require_for()`. Same pattern; routes through the tool manifest's `effects` list rather than matching on the action string.
+`ApprovalPolicy.require_for_effects(manifests, effects)` ships in `nodus-approvals` **0.2.0** (upstreamed 2026-09-23). It routes through each tool manifest's `effects` list rather than matching on the action string, and takes the manifests as its first argument:
+
+```python
+ApprovalPolicy.require_for_effects(TOOL_MANIFESTS, ["network.write", "fs.write"])
+```
+
+Two things to know. The policy is a **snapshot** of the manifests at the call, so rebuild it wherever the tool set changes. And it **raises** on an effect no manifest declares, rather than silently gating nothing — intersect with `declared_effects()` first if passing a vocabulary a registry may not fully use.
 
 ---
 
@@ -327,7 +333,7 @@ ApprovalPolicy.require_for_effects(["network.write", "fs.write"])
 
 ## Open Items Before Implementation
 
-1. ~~**`require_for_effects()` on ApprovalPolicy**~~ — DONE (2026-06-21). Implemented in-repo at `src/policy.py::require_for_effects(manifests, effects)` (the upstream `nodus_approvals.ApprovalPolicy` still ships only `require_for()`). Routes through each manifest's `effects` list to derive the gated tool-name patterns. Follow-up: upstream it as an `ApprovalPolicy.require_for_effects` classmethod.
+1. ~~**`require_for_effects()` on ApprovalPolicy**~~ — DONE, and **upstreamed 2026-09-23**. It was implemented in-repo at `src/policy.py` while `nodus_approvals` shipped only `require_for()`; it is now `ApprovalPolicy.require_for_effects` in **nodus-approvals 0.2.0** (nodus-approvals#1, PR #2). `src/policy.py` is deleted and `src/runtime.py` imports the classmethod; `requirements.txt` floors the dependency at `>=0.2.0`, because the code no longer works without it. Verified identical: the upstream call produces the same rules as the in-repo one for this project's `TOOL_MANIFESTS` / `GATED_EFFECTS`.
 
 ### Implementation status (2026-06-21)
 

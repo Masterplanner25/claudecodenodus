@@ -1,6 +1,6 @@
 # Runtime
 nodus-lang>=5.14.0
-nodus-approvals>=0.1.0
+nodus-approvals>=0.2.0
 nodus-llm>=0.1.0
 nodus-retry>=0.2.0      # SqliteEffectStore for durable @exactly_once
 httpx>=0.28

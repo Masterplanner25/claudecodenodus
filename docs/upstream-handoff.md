@@ -1,5 +1,56 @@
 # Upstream handoff — findings to report to Nodus
 
+> **All five are resolved upstream (2026-09-23/24). Nothing here is open.**
+> Verified against `Masterplanner25/Nodus` `main` and, for item 4, against
+> nodus-approvals 0.2.0 on PyPI. Kept as the record of what was reported and
+> what it turned into, not as a to-do list.
+>
+> | # | Reported as | Upstream | Outcome |
+> |---|---|---|---|
+> | 1 | child VM lacks `tool_registry` | [#868](https://github.com/Masterplanner25/Nodus/issues/868) → PR #874 | fixed — **12** attributes, not 2, across 4 derivation sites |
+> | 2 | stranded runs vs `migrate-store` | [#869](https://github.com/Masterplanner25/Nodus/issues/869) → PR #876 | fixed, and raised to `severity:high` |
+> | 3 | #482 reject-and-revise | [#870](https://github.com/Masterplanner25/Nodus/issues/870) → PR #877 | fixed as a **bug**, not a docs item |
+> | 4 | `require_for_effects` | [nodus-approvals#1](https://github.com/Masterplanner25/nodus-approvals/issues/1) → PR #2 | shipped in **0.2.0** |
+> | 5 | key-sorted rehydration | [#871](https://github.com/Masterplanner25/Nodus/issues/871) → PR #878 | fixed |
+>
+> Two further defects were found while fixing these and are also closed:
+> [#873](https://github.com/Masterplanner25/Nodus/issues/873) (a resume inherited
+> no run budget — five bounds lost, so a guest escaped every limit by parking and
+> resuming) and
+> [#875](https://github.com/Masterplanner25/Nodus/issues/875)
+> (`max_terminal_runs` could not see the runs it existed to delete).
+>
+> **Three corrections to what this document says.** They are left in place below
+> rather than edited away, because each one is a reason the report was useful:
+>
+> 1. **Item 1's "secondary symptom" was misdiagnosed here.** It is not `std:tool`
+>    re-import stickiness. The repro resumes the *same* `graph_id` twice; the
+>    first (broken) resume drives the run to `completed`, and the second returns
+>    its recorded result without re-executing. With two distinct run ids the
+>    unpatched direct path is green. One bug, not two.
+> 2. **Item 1's suggested fix was too narrow, and the alternative was worse.**
+>    Copying `tool_registry` and `effect_store` fixes 2 of 12 lost attributes;
+>    `child._caller_vm = self`, which #868 floated as the wider option, fixes
+>    **1 of 12** — `tool_registry` is the only one read through the `root_vm()`
+>    chain, which is why it looked complete. The shipped fix names the whole set
+>    once (`HOST_STATE_ATTRIBUTES` + `inherit_host_state`) at all four sites.
+> 3. **Item 3's premise was right and upstream's was wrong.** #482 refused
+>    checkpoint-plus-payload on the stated grounds that the payload was "silently
+>    discarded". Measured on 4.0.8, it reached the replayed step; what it did not
+>    do was *satisfy the wait*. The refusal now covers only `checkpoint` with no
+>    payload, and the 5.5.0 changelog entry carries a correction note.
+>
+> **What changed in this repo as a result:** `src/policy.py` is deleted and
+> `src/runtime.py` imports `ApprovalPolicy.require_for_effects` from
+> nodus-approvals 0.2.0 (`requirements.txt` floors it at `>=0.2.0`). The
+> workaround in item 1 (`ResearchRuntime._resume_on_primed_vm`) and the
+> canonicalisation in item 5 (`_canonical_json`) are **still in place and still
+> correct**; they are now belt-and-braces rather than load-bearing, and can be
+> removed whenever someone wants to, once this project is on a nodus-lang release
+> that includes the fixes. Nothing here has shipped in a nodus-lang release yet —
+> all seven fixes are on `main` in `[Unreleased]`.
+
+
 Repo: `C:\dev\claudecodenodus` (Nodus research agent). Written 2026-09-20 after
 upgrading `nodus-lang` 4.0.8 → **5.14.0** (all `nodus-*` companions bumped;
 `nodus-approvals` is still 0.1.0). Everything below was verified against the

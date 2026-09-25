@@ -21,13 +21,12 @@ os.environ.setdefault("NODUS_WORKFLOW_STORE_BACKEND", "sqlite")
 
 from nodus.runtime.embedding import NodusRuntime
 from nodus.orchestration.task_graph import get_registered_vm
-from nodus_approvals import ApprovalGate
+from nodus_approvals import ApprovalGate, ApprovalPolicy
 from nodus_llm import CredentialProfile, CredentialStore, FailoverClient
 from nodus_retry import SqliteEffectStore
 
 from src.approval_store import FileApprovalStore
 from src.memory import SqliteMemoryStore, topic_tags
-from src.policy import require_for_effects
 from src.web import HttpWebBackend, OfflineWebBackend, build_web_backend
 from src.sandbox import DockerCodeRunner, build_code_runner
 from src.notify import HttpNotifier, ConsoleNotifier, build_notifier
@@ -139,7 +138,7 @@ class ResearchRuntime:
         self.workspace.mkdir(parents=True, exist_ok=True)
         (self.workspace / "output").mkdir(exist_ok=True)
 
-        self._policy = policy if policy is not None else require_for_effects(TOOL_MANIFESTS, GATED_EFFECTS)
+        self._policy = policy if policy is not None else ApprovalPolicy.require_for_effects(TOOL_MANIFESTS, GATED_EFFECTS)
         # Default to a durable, file-backed store under the workspace so approvals
         # survive across processes — a human approving a gated tool in a different
         # process (the agent's whole point) sees the same approval state.
